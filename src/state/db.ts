@@ -12,6 +12,9 @@ export interface PrState {
   lastSourceCommit?: string;
   /** 总评 thread id（编辑同一条而不是新发） */
   summaryThreadId?: number;
+  /** 重启恢复用：能重建 PrRef 的最小信息 */
+  repoId?: string;
+  remoteUrl?: string;
 }
 
 export interface FindingRow {
@@ -109,13 +112,18 @@ export class StateDb {
     this.migrate();
   }
 
-  /** 老库升级：findings 补 repo_key / note 列并回填 */
+  /** 老库升级：findings 补 repo_key / note 列并回填；pr_state 补恢复用列 */
   private migrate(): void {
     const cols = (this.db.prepare('PRAGMA table_info(findings)').all() as { name: string }[]).map(
       (c) => c.name,
     );
     if (!cols.includes('repo_key')) this.db.exec("ALTER TABLE findings ADD COLUMN repo_key TEXT NOT NULL DEFAULT ''");
     if (!cols.includes('note')) this.db.exec('ALTER TABLE findings ADD COLUMN note TEXT');
+    const prCols = (this.db.prepare('PRAGMA table_info(pr_state)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    if (!prCols.includes('repo_id')) this.db.exec('ALTER TABLE pr_state ADD COLUMN repo_id TEXT');
+    if (!prCols.includes('remote_url')) this.db.exec('ALTER TABLE pr_state ADD COLUMN remote_url TEXT');
     // repo_key = pr_key 去掉最后一段（project/repo/prId → project/repo）
     const empty = this.db
       .prepare("SELECT DISTINCT pr_key FROM findings WHERE repo_key = ''")
@@ -137,6 +145,8 @@ export class StateDb {
       lastReviewedCommit: (row.last_reviewed_commit as string) ?? undefined,
       lastSourceCommit: (row.last_source_commit as string) ?? undefined,
       summaryThreadId: (row.summary_thread_id as number) ?? undefined,
+      repoId: (row.repo_id as string) ?? undefined,
+      remoteUrl: (row.remote_url as string) ?? undefined,
     };
   }
 
@@ -145,13 +155,15 @@ export class StateDb {
     const merged = { ...existing, ...patch };
     this.db
       .prepare(
-        `INSERT INTO pr_state (pr_key, is_draft, last_reviewed_commit, last_source_commit, summary_thread_id)
-         VALUES (@prKey, @isDraft, @lastReviewedCommit, @lastSourceCommit, @summaryThreadId)
+        `INSERT INTO pr_state (pr_key, is_draft, last_reviewed_commit, last_source_commit, summary_thread_id, repo_id, remote_url)
+         VALUES (@prKey, @isDraft, @lastReviewedCommit, @lastSourceCommit, @summaryThreadId, @repoId, @remoteUrl)
          ON CONFLICT(pr_key) DO UPDATE SET
            is_draft = @isDraft,
            last_reviewed_commit = @lastReviewedCommit,
            last_source_commit = @lastSourceCommit,
-           summary_thread_id = @summaryThreadId`,
+           summary_thread_id = @summaryThreadId,
+           repo_id = @repoId,
+           remote_url = @remoteUrl`,
       )
       .run({
         prKey,
@@ -159,7 +171,23 @@ export class StateDb {
         lastReviewedCommit: merged.lastReviewedCommit ?? null,
         lastSourceCommit: merged.lastSourceCommit ?? null,
         summaryThreadId: merged.summaryThreadId ?? null,
+        repoId: merged.repoId ?? null,
+        remoteUrl: merged.remoteUrl ?? null,
       });
+  }
+
+  /** 重启恢复：active（非草稿）且源 commit 落后于已 review commit 的 PR */
+  listPrStatesNeedingReview(): PrState[] {
+    const rows = this.db
+      .prepare(
+        `SELECT pr_key FROM pr_state
+         WHERE is_draft = 0
+           AND last_source_commit IS NOT NULL
+           AND remote_url IS NOT NULL
+           AND (last_reviewed_commit IS NULL OR last_reviewed_commit != last_source_commit)`,
+      )
+      .all() as { pr_key: string }[];
+    return rows.map((r) => this.getPrState(r.pr_key)!);
   }
 
   insertFinding(row: Omit<FindingRow, 'status' | 'note'>): void {
@@ -289,6 +317,29 @@ export class StateDb {
       droppedByChallenge: agg.dropped ?? 0,
       byKind: Object.fromEntries(kinds.map((k) => [k.kind, k.n])),
     };
+  }
+
+  /** 最近的任务记录（管理面板用），新的在前 */
+  listRecentRuns(limit = 50): Array<ReviewRunRow & { id: number; createdAt: string }> {
+    return (
+      this.db
+        .prepare('SELECT * FROM review_runs ORDER BY id DESC LIMIT ?')
+        .all(limit) as Record<string, unknown>[]
+    ).map((r) => ({
+      id: r.id as number,
+      prKey: r.pr_key as string,
+      repoKey: r.repo_key as string,
+      kind: r.kind as ReviewRunRow['kind'],
+      ok: r.ok === 1,
+      durationMs: r.duration_ms as number,
+      findingsTotal: r.findings_total as number,
+      findingsPosted: r.findings_posted as number,
+      mustFix: r.must_fix as number,
+      droppedByChallenge: r.dropped_by_challenge as number,
+      degraded: r.degraded === 1,
+      error: (r.error as string) ?? undefined,
+      createdAt: r.created_at as string,
+    }));
   }
 
   /** 各仓库 finding 采纳情况（accepted=fixed/closed，rejected=wontfix） */

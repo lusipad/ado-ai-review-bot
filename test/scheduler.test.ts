@@ -173,6 +173,46 @@ describe('Scheduler task lane（/fix 等不可合并任务）', () => {
   });
 });
 
+describe('Scheduler drain（优雅停机）', () => {
+  it('等待在跑任务收尾，期间丢弃新任务，清空防抖', async () => {
+    const s = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 1, debounceMs: 60_000, logger: silentLogger });
+    const gate = deferred();
+    const runs: string[] = [];
+    s.enqueueReview('pr-1', 'full', async () => {
+      runs.push('running');
+      await gate.promise;
+    });
+    let debounceFired = 0;
+    s.debouncePush('pr-2', () => debounceFired++);
+    await tick();
+
+    const drainP = s.drain(5_000);
+    // 排水期间的新任务被丢弃
+    s.enqueueReview('pr-3', 'full', async () => runs.push('late'));
+    s.enqueueTask('pr-4', async () => runs.push('late-task'));
+    expect(s.stats().pending).toBe(0);
+    expect(s.stats().draining).toBe(true);
+    expect(s.stats().debouncing).toBe(0); // 防抖被清空
+
+    gate.resolve();
+    const result = await drainP;
+    expect(result.completed).toBe(true);
+    expect(runs).toEqual(['running']);
+    expect(debounceFired).toBe(0);
+  });
+
+  it('超时返回被打断的任务 key', async () => {
+    const s = new Scheduler({ reviewConcurrency: 1, qaConcurrency: 1, debounceMs: 1000, logger: silentLogger });
+    const gate = deferred();
+    s.enqueueReview('pr-stuck', 'full', async () => gate.promise);
+    await tick();
+    const result = await s.drain(300);
+    expect(result.completed).toBe(false);
+    expect(result.interrupted).toEqual(['pr-stuck']);
+    gate.resolve();
+  });
+});
+
 describe('Scheduler qa lane', () => {
   it('review 占满时问答仍立即执行', async () => {
     const s = new Scheduler({ reviewConcurrency: 1, qaConcurrency: 1, debounceMs: 1000, logger: consoleLogger });

@@ -95,6 +95,38 @@ describe('StateDb', () => {
     db.close();
   });
 
+  it('重启恢复扫描：源 commit 落后且资料齐全的 active PR', () => {
+    const db = makeDb();
+    // 需要恢复：source != reviewed 且有 remote_url
+    db.upsertPrState('P/R/1', { isDraft: false, lastSourceCommit: 'new', lastReviewedCommit: 'old', repoId: 'g1', remoteUrl: 'http://r' });
+    // 不需要：已 review 到位
+    db.upsertPrState('P/R/2', { isDraft: false, lastSourceCommit: 'c', lastReviewedCommit: 'c', repoId: 'g1', remoteUrl: 'http://r' });
+    // 不需要：草稿
+    db.upsertPrState('P/R/3', { isDraft: true, lastSourceCommit: 'x', repoId: 'g1', remoteUrl: 'http://r' });
+    // 不需要：老数据无 remote_url（无法重建 PrRef）
+    db.upsertPrState('P/R/4', { isDraft: false, lastSourceCommit: 'x' });
+    // 需要：从未 review 过
+    db.upsertPrState('P/R/5', { isDraft: false, lastSourceCommit: 'y', repoId: 'g2', remoteUrl: 'http://r2' });
+
+    const stale = db.listPrStatesNeedingReview();
+    expect(stale.map((s) => s.prKey).sort()).toEqual(['P/R/1', 'P/R/5']);
+    expect(stale.find((s) => s.prKey === 'P/R/1')).toMatchObject({ repoId: 'g1', remoteUrl: 'http://r' });
+    db.close();
+  });
+
+  it('listRecentRuns 新的在前', () => {
+    const db = makeDb();
+    const base = { prKey: 'P/R/1', repoKey: 'P/R', findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false };
+    db.insertReviewRun({ ...base, kind: 'full', ok: true, durationMs: 100 });
+    db.insertReviewRun({ ...base, kind: 'qa', ok: false, durationMs: 200, error: 'boom' });
+    const runs = db.listRecentRuns(10);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({ kind: 'qa', ok: false, error: 'boom' });
+    expect(runs[0].createdAt).toBeTruthy();
+    expect(db.listRecentRuns(1)).toHaveLength(1);
+    db.close();
+  });
+
   it('review_runs 记录与聚合统计', () => {
     const db = makeDb();
     const base = {

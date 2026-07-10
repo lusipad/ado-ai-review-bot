@@ -105,7 +105,15 @@ npm start
 
 ### 第 4 步：配置 Service Hooks
 
-每个接入项目配 3 个订阅。ADO 项目 → **Project settings → Service hooks → Create subscription → Web Hooks**：
+**推荐用脚本一键配置**（幂等可重跑，参数全部按实测正确姿势；也可用于密钥轮换后的批量更新）：
+
+```powershell
+.\scripts\setup-hooks.ps1 -Project MyProject -BotUrl http://bot-host:3000
+.\scripts\setup-hooks.ps1 -AllProjects -BotUrl http://bot-host:3000   # 全部项目
+# ADO_URL / ADO_PAT / WEBHOOK_SECRET 自动从 .env 读取
+```
+
+手动配置的话：ADO 项目 → **Project settings → Service hooks → Create subscription → Web Hooks**：
 
 | # | Trigger | 筛选 | 作用 |
 |---|---|---|---|
@@ -127,6 +135,22 @@ npm start
 
 **收工。** 建一个测试 PR，一两分钟内就能看到 bot 的总评和行内评论；在评论里 `@ai-review-bot` 提问试试对话。完整的上线验收项见[验收清单](#上线验收清单)。
 
+## 管理面板
+
+浏览器打开 `http://<bot>:3000/admin`（弹出登录框：用户名任意，密码填 `WEBHOOK_SECRET`）：
+
+- **概览卡片**：任务数、覆盖 PR、发布意见、必修数、拦截误报、失败数、平均耗时（1/7/30 天切换）；
+- **队列**：正在处理哪些 PR、排队/防抖/问答通道状态、是否停机排水中；
+- **各仓库采纳率** 与 **最近 50 条任务**（类型、结果、耗时、错误信息）；30 秒自动刷新。
+
+单文件页面、无外部资源依赖，只读不可操作（误触无风险）。程序化访问用 [`GET /stats`](#反馈学习与度量)。
+
+## 运维行为
+
+- **优雅停机**：收到 SIGTERM/Ctrl+C（nssm stop 默认发 Ctrl+C）后停接新任务，等在跑任务收尾（`SHUTDOWN_GRACE_MS`，默认 2 分钟），超时任务安全放弃；
+- **启动恢复**：启动时扫描状态库，重启期间错过 push 或被打断的 review 自动补一次增量——升级/重启不丢任务；
+- **崩溃安全**：所有状态在 SQLite（WAL），进程崩溃后同样靠启动恢复兜底。
+
 ## 配置参考
 
 必填只有 4 项，其余都有合理默认值（完整注释见 [.env.example](.env.example)）：
@@ -139,6 +163,7 @@ npm start
 | `INTRANET_API_KEY` | ✅ | — | 内网模型 API key（codex `env_key` 指向的变量） |
 | `HOST` / `PORT` | | `0.0.0.0` / `3000` | 监听地址 |
 | `DATA_DIR` | | `./data` | mirror / worktree / SQLite 目录 |
+| `SHUTDOWN_GRACE_MS` | | `120000` | 优雅停机等待在跑任务收尾的上限 |
 | `BOT_ACCOUNT_ID` | | 自动获取 | bot 账号 GUID，一般无需配置 |
 | `BOT_DISPLAY_NAME` | | `ai-review-bot` | @提及匹配用的显示名，需与 ADO 账号一致 |
 | `DEBOUNCE_MS` | | `180000` | push 防抖窗口（毫秒） |

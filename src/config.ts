@@ -51,6 +51,8 @@ export interface Config {
   codexExtraArgs: string[];
   /** 非超时失败的自动重试次数 */
   codexRetries: number;
+  /** 优雅停机时等待在跑任务收尾的最长时间（毫秒） */
+  shutdownGraceMs: number;
 
   maxInlineComments: number;
   maxChangedFiles: number;
@@ -120,6 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexSandbox: env.CODEX_SANDBOX ?? 'read-only',
     codexExtraArgs: (env.CODEX_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
     codexRetries: num(env, 'CODEX_RETRIES', 1),
+    shutdownGraceMs: num(env, 'SHUTDOWN_GRACE_MS', 2 * 60 * 1000),
 
     maxInlineComments: num(env, 'MAX_INLINE_COMMENTS', 10),
     maxChangedFiles: num(env, 'MAX_CHANGED_FILES', 50),

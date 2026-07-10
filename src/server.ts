@@ -17,6 +17,7 @@ import { NotifyDispatcher } from './notify';
 import { prKey as toPrKey, type Logger } from './types';
 import { collectStats, formatWeeklyReport } from './stats';
 import { msUntilNextWeekly } from './util';
+import { ADMIN_HTML, buildOverview } from './admin';
 
 export interface AppDeps {
   config: Config;
@@ -66,6 +67,29 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     return collectStats(deps.db, days, q.repo || undefined);
   });
 
+  // 管理面板（只读）：浏览器 basic auth，用户名任意、密码=WEBHOOK_SECRET
+  app.get('/admin', async (req, reply) => {
+    if (!isAuthorized(req.headers, config.webhookSecret)) {
+      return reply
+        .status(401)
+        .header('www-authenticate', 'Basic realm="ai-review-bot"')
+        .send({ error: 'unauthorized' });
+    }
+    return reply.type('text/html; charset=utf-8').send(ADMIN_HTML);
+  });
+
+  app.get('/admin/api/overview', async (req, reply) => {
+    if (!isAuthorized(req.headers, config.webhookSecret)) {
+      return reply
+        .status(401)
+        .header('www-authenticate', 'Basic realm="ai-review-bot"')
+        .send({ error: 'unauthorized' });
+    }
+    const q = req.query as { days?: string };
+    const days = Math.min(365, Math.max(1, Number(q.days) || 7));
+    return buildOverview(deps.db, deps.scheduler, days);
+  });
+
   app.post('/webhook/ado', async (req, reply) => {
     if (!isAuthorized(req.headers, config.webhookSecret)) {
       return reply.status(401).send({ error: 'unauthorized' });
@@ -112,14 +136,24 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
     switch (action.type) {
       case 'record_draft': {
-        const key = toPrKey(action.pr);
-        db.upsertPrState(key, { isDraft: true, lastSourceCommit: action.pr.sourceCommit });
+        const pr = action.pr;
+        db.upsertPrState(toPrKey(pr), {
+          isDraft: true,
+          lastSourceCommit: pr.sourceCommit,
+          repoId: pr.repoId,
+          remoteUrl: pr.remoteUrl,
+        });
         break;
       }
       case 'full_review': {
         const pr = action.pr;
         const key = toPrKey(pr);
-        db.upsertPrState(key, { isDraft: false, lastSourceCommit: pr.sourceCommit });
+        db.upsertPrState(key, {
+          isDraft: false,
+          lastSourceCommit: pr.sourceCommit,
+          repoId: pr.repoId,
+          remoteUrl: pr.remoteUrl,
+        });
         const manual = action.reason === '/review 命令';
         scheduler.enqueueReview(key, 'full', () => pipeline.runFullReview(pr, action.reason, manual));
         break;
@@ -128,7 +162,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const pr = action.pr;
         const key = toPrKey(pr);
         // 立即记录已见 commit：同一 commit 的重复 updated 事件在路由层被忽略
-        db.upsertPrState(key, { isDraft: false, lastSourceCommit: pr.sourceCommit });
+        db.upsertPrState(key, {
+          isDraft: false,
+          lastSourceCommit: pr.sourceCommit,
+          repoId: pr.repoId,
+          remoteUrl: pr.remoteUrl,
+        });
         scheduler.debouncePush(key, () =>
           scheduler.enqueueReview(key, 'incremental', (kind) =>
             kind === 'full'
@@ -202,6 +241,50 @@ export function createApp(config: Config): { app: FastifyInstance; deps: AppDeps
   return { app, deps };
 }
 
+/**
+ * 重启恢复：上次停机时被打断/错过的 review（源 commit 落后于已 review commit 的 active PR）
+ * 重新入队为增量 review。PrInfo 只需最小字段，runReview 会重新拉取最新 PR 状态。
+ */
+export function recoverPendingReviews(deps: AppDeps, logger: Logger): number {
+  const stale = deps.db.listPrStatesNeedingReview();
+  for (const s of stale) {
+    const [project, repoName, prId] = splitPrKey(s.prKey);
+    if (!project || !repoName || !prId || !s.repoId || !s.remoteUrl) continue;
+    const pr = {
+      project,
+      repoName,
+      pullRequestId: prId,
+      repoId: s.repoId,
+      remoteUrl: s.remoteUrl,
+      isDraft: false,
+      status: 'active',
+      title: '',
+      description: '',
+      sourceRefName: '',
+      targetRefName: '',
+      sourceCommit: s.lastSourceCommit,
+    };
+    logger.info({ prKey: s.prKey }, '恢复上次停机遗留的 review');
+    deps.scheduler.enqueueReview(s.prKey, 'incremental', (kind) =>
+      kind === 'full'
+        ? deps.pipeline.runFullReview(pr, '重启恢复', false)
+        : deps.pipeline.runIncrementalReview(pr),
+    );
+  }
+  return stale.length;
+}
+
+/** prKey = project/repoName/prId；repo 名不含 /（ADO 命名规则），project 可能含（取首段） */
+function splitPrKey(prKey: string): [string, string, number] | [] {
+  const parts = prKey.split('/');
+  if (parts.length < 3) return [];
+  const prId = Number(parts[parts.length - 1]);
+  const repoName = parts[parts.length - 2];
+  const project = parts.slice(0, -2).join('/');
+  if (!Number.isInteger(prId)) return [];
+  return [project, repoName, prId];
+}
+
 /** 每周一 09:00（服务器本地时区）推送度量周报；定时器 unref，不阻止进程退出 */
 export function scheduleWeeklyReport(deps: AppDeps, logger: Logger): void {
   const tick = () => {
@@ -240,7 +323,27 @@ async function main(): Promise<void> {
   }
   await deps.workspace.cleanupOrphans();
   if (config.weeklyReportEnabled) scheduleWeeklyReport(deps, app.log);
+
+  // 优雅停机：停接新任务 → 等在跑任务收尾 → 退出（超时任务由下次启动的恢复扫描补跑）
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info({ signal, graceMs: config.shutdownGraceMs }, '收到停机信号，等待在跑任务收尾');
+    const result = await deps.scheduler.drain(config.shutdownGraceMs);
+    if (!result.completed) {
+      app.log.warn({ interrupted: result.interrupted }, '排水超时，以下任务将由重启恢复补跑');
+    }
+    await app.close().catch(() => undefined);
+    deps.db.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+
   await app.listen({ host: config.host, port: config.port });
+  const recovered = recoverPendingReviews(deps, app.log);
+  if (recovered > 0) app.log.info({ recovered }, '已重新入队上次停机遗留的 review');
   app.log.info(
     { port: config.port, dataDir: config.dataDir },
     'AI Review Bot 已启动，等待 Service Hook 事件',

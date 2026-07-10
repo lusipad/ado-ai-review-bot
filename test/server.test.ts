@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { registerRoutes, isAuthorized, type AppDeps } from '../src/server';
+import { registerRoutes, isAuthorized, recoverPendingReviews, type AppDeps } from '../src/server';
 import { Scheduler } from '../src/queue/scheduler';
 import { StateDb } from '../src/state/db';
 import type { Config } from '../src/config';
@@ -193,6 +193,57 @@ describe('isAuthorized', () => {
   it('长度不同的密钥直接拒绝', () => {
     expect(isAuthorized({ 'x-webhook-secret': 'x' }, SECRET)).toBe(false);
     expect(isAuthorized({ 'x-webhook-secret': SECRET }, SECRET)).toBe(true);
+  });
+});
+
+describe('管理面板与重启恢复', () => {
+  it('/admin 无凭据 → 401 + WWW-Authenticate（触发浏览器登录框）', async () => {
+    const res = await app.inject({ method: 'GET', url: '/admin' });
+    expect(res.statusCode).toBe(401);
+    expect(res.headers['www-authenticate']).toContain('Basic');
+  });
+
+  it('/admin 带密码返回面板页面；/admin/api/overview 返回聚合数据', async () => {
+    const basic = 'Basic ' + Buffer.from(`admin:${SECRET}`).toString('base64');
+    const page = await app.inject({ method: 'GET', url: '/admin', headers: { authorization: basic } });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['content-type']).toContain('text/html');
+    expect(page.body).toContain('管理面板');
+
+    db.insertReviewRun({
+      prKey: 'P/R/1', repoKey: 'P/R', kind: 'full', ok: true, durationMs: 500,
+      findingsTotal: 1, findingsPosted: 1, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    const api = await app.inject({ method: 'GET', url: '/admin/api/overview?days=7', headers: { authorization: basic } });
+    expect(api.statusCode).toBe(200);
+    const body = api.json();
+    expect(body.queue).toMatchObject({ running: 0, draining: false });
+    expect(Array.isArray(body.queue.runningKeys)).toBe(true);
+    expect(body.stats.overview.runs).toBe(1);
+    expect(body.recentRuns).toHaveLength(1);
+  });
+
+  it('recoverPendingReviews：落后的 PR 重新入队增量 review', async () => {
+    db.upsertPrState('Fabrikam/Fabrikam/9', {
+      isDraft: false,
+      lastSourceCommit: 'abc123',
+      lastReviewedCommit: 'old000',
+      repoId: 'repo-guid-9',
+      remoteUrl: 'https://ado.corp.local/DefaultCollection/Fabrikam/_git/Fabrikam',
+    });
+    const scheduler = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 1, debounceMs: 10, logger: silentLogger });
+    const n = recoverPendingReviews(
+      { db, scheduler, pipeline: pipeline as unknown as Pipeline } as unknown as AppDeps,
+      silentLogger,
+    );
+    expect(n).toBe(1);
+    await vi.waitFor(() => expect(pipeline.runIncrementalReview).toHaveBeenCalledTimes(1));
+    expect(pipeline.runIncrementalReview.mock.calls[0][0]).toMatchObject({
+      project: 'Fabrikam',
+      repoName: 'Fabrikam',
+      pullRequestId: 9,
+      repoId: 'repo-guid-9',
+    });
   });
 });
 
