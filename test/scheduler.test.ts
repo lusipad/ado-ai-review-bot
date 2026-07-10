@@ -128,6 +128,51 @@ describe('Scheduler push 防抖', () => {
   });
 });
 
+describe('Scheduler task lane（/fix 等不可合并任务）', () => {
+  it('与同 PR 的 review 串行，task 之间 FIFO 不合并', async () => {
+    const s = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 1, debounceMs: 1000, logger: silentLogger });
+    const gate = deferred();
+    const runs: string[] = [];
+    s.enqueueReview('pr-1', 'full', async () => {
+      runs.push('review');
+      await gate.promise;
+    });
+    await tick();
+    // review 运行中入队两个 fix：都要等，且互不合并
+    s.enqueueTask('pr-1', async () => {
+      runs.push('fix-1');
+    });
+    s.enqueueTask('pr-1', async () => {
+      runs.push('fix-2');
+    });
+    await tick();
+    expect(runs).toEqual(['review']);
+    gate.resolve();
+    await tick();
+    await tick();
+    await tick();
+    expect(runs).toEqual(['review', 'fix-1', 'fix-2']);
+  });
+
+  it('不同 PR 的 task 可并行', async () => {
+    const s = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 1, debounceMs: 1000, logger: silentLogger });
+    const started: string[] = [];
+    const gate = deferred();
+    s.enqueueTask('pr-a', async () => {
+      started.push('a');
+      await gate.promise;
+    });
+    s.enqueueTask('pr-b', async () => {
+      started.push('b');
+      await gate.promise;
+    });
+    await tick();
+    expect(started.sort()).toEqual(['a', 'b']);
+    gate.resolve();
+    await tick();
+  });
+});
+
 describe('Scheduler qa lane', () => {
   it('review 占满时问答仍立即执行', async () => {
     const s = new Scheduler({ reviewConcurrency: 1, qaConcurrency: 1, debounceMs: 1000, logger: consoleLogger });

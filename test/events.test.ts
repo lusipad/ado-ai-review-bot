@@ -130,6 +130,23 @@ describe('routeEvent: 评论事件', () => {
     if (action.type === 'full_review') expect(action.reason).toBe('/review 命令');
   });
 
+  it('/fix 命令 → fix 任务，带线程与额外指示', () => {
+    const event = setComment(clone(commented()), { content: '/fix 顺便把日志级别改成 warn' });
+    const action = routeEvent(event, ctx(), ADO_URL);
+    expect(action.type).toBe('fix');
+    if (action.type === 'fix') {
+      expect(action.threadId).toBe(5);
+      expect(action.instruction).toBe('顺便把日志级别改成 warn');
+    }
+  });
+
+  it('@bot /fix（带 mention 前缀）→ fix 任务', () => {
+    const event = setComment(clone(commented()), { content: `@<${BOT_ID}> /fix` });
+    const action = routeEvent(event, ctx(), ADO_URL);
+    expect(action.type).toBe('fix');
+    if (action.type === 'fix') expect(action.instruction).toBe('');
+  });
+
   it('普通评论（不含 @bot / 命令）→ 忽略', () => {
     const event = setComment(clone(commented()), { content: 'LGTM 👍' });
     expect(routeEvent(event, ctx(), ADO_URL).type).toBe('ignore');

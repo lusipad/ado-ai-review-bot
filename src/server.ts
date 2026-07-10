@@ -121,6 +121,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         scheduler.enqueueQa(() => pipeline.runQa({ pr, threadId, commentId, question }));
         break;
       }
+      case 'fix': {
+        // 与 review 同一 per-PR 串行域：修复会改源分支，不能与 review 并发
+        const { pr, threadId, commentId, instruction } = action;
+        scheduler.enqueueTask(toPrKey(pr), () =>
+          pipeline.runFix({ pr, threadId, commentId, instruction }),
+        );
+        break;
+      }
       case 'ignore':
         break;
     }

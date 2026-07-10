@@ -112,6 +112,41 @@ export class Workspace {
       .catch((err) => this.logger.warn({ err: String(err), worktreePath }, '清理 worktree 失败'));
   }
 
+  /** 暂存并提交 worktree 中的全部改动；无改动返回 undefined，否则返回新 commit id */
+  async commitAll(
+    worktreePath: string,
+    message: string,
+    author: { name: string; email: string },
+  ): Promise<string | undefined> {
+    const status = await this.git(['status', '--porcelain'], worktreePath);
+    if (!status.trim()) return undefined;
+    await this.git(['add', '-A'], worktreePath);
+    await this.git(
+      [
+        '-c',
+        `user.name=${author.name}`,
+        '-c',
+        `user.email=${author.email}`,
+        'commit',
+        '-m',
+        message,
+      ],
+      worktreePath,
+    );
+    return (await this.git(['rev-parse', 'HEAD'], worktreePath)).trim();
+  }
+
+  /**
+   * 把 worktree 的 HEAD 推到远端分支。
+   * 显式推 URL 而不是 origin：mirror 的 remote 配了 mirror=true，按名字推会变成全量镜像推送。
+   */
+  async pushHead(worktreePath: string, remoteUrl: string, branch: string): Promise<void> {
+    await this.git(
+      [...this.authArgs(), 'push', remoteUrl, `HEAD:refs/heads/${branch}`],
+      worktreePath,
+    );
+  }
+
   /** commit 是否已在 mirror 中（避免不必要的 fetch） */
   async hasCommit(repoKey: string, commitId: string): Promise<boolean> {
     try {

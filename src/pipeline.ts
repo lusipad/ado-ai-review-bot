@@ -17,6 +17,7 @@ import {
   type CodexRunResult,
 } from './engine/codex';
 import { NotifyDispatcher } from './notify';
+import { KnowledgeStore } from './knowledge';
 
 const SEVERITY_RANK: Record<Severity, number> = { 'must-fix': 0, suggestion: 1, nit: 2 };
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -40,9 +41,11 @@ interface RepoYamlConfig {
   ignorePaths?: string[];
   focus?: string;
   challenge?: boolean;
+  allowFix?: boolean;
+  knowledgeBase?: boolean;
 }
 
-interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge'>> {
+interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge' | 'allowFix' | 'knowledgeBase'>> {
   ignorePaths: string[];
   focus: string;
   /** minSeverity 是被采纳率数据自动收紧的（总评里要向用户说明） */
@@ -56,7 +59,18 @@ export interface QaJob {
   question: string;
 }
 
-export type CodexRunner = (worktree: string, prompt: string) => Promise<CodexRunResult>;
+export interface FixJob {
+  pr: PrInfo;
+  threadId: number;
+  commentId: number;
+  instruction: string;
+}
+
+export type CodexRunner = (
+  worktree: string,
+  prompt: string,
+  opts?: { sandbox?: string },
+) => Promise<CodexRunResult>;
 
 export interface PipelineDeps {
   config: Config;
@@ -71,15 +85,16 @@ export interface PipelineDeps {
 
 export class Pipeline {
   private readonly codexRun: CodexRunner;
+  private readonly knowledge: KnowledgeStore;
 
   constructor(private readonly deps: PipelineDeps) {
     this.codexRun =
       deps.codexRun ??
-      ((worktree, prompt) =>
+      ((worktree, prompt, opts) =>
         runCodex(
           {
             bin: deps.config.codexBin,
-            sandbox: deps.config.codexSandbox,
+            sandbox: opts?.sandbox ?? deps.config.codexSandbox,
             timeoutMs: deps.config.codexTimeoutMs,
             extraArgs: deps.config.codexExtraArgs,
             logger: deps.logger,
@@ -87,6 +102,7 @@ export class Pipeline {
           worktree,
           prompt,
         ));
+    this.knowledge = new KnowledgeStore(path.join(deps.config.dataDir, 'knowledge'));
   }
 
   // ---------- 全量 review ----------
@@ -198,6 +214,7 @@ export class Pipeline {
               .map((f) => `- ${f.file}: ${f.title}${f.note ? `（团队理由：${f.note}）` : ''}`)
               .join('\n')
           : '（无）',
+        repo_map: this.repoMapFor(rKey, conf),
       });
 
       const result = await this.codexRun(worktree, prompt);
@@ -241,6 +258,13 @@ export class Pipeline {
         { key, findings: output.findings.length, droppedByChallenge, degraded: output.degraded },
         'review 完成',
       );
+
+      // 知识库缺失/过期 → 复用本次 worktree 生成（失败不影响 review 结果）
+      if (conf.knowledgeBase) {
+        await this.maybeGenerateKnowledge(rKey, worktree, checkoutCommit).catch((err) =>
+          logger.warn({ rKey, err: String(err) }, '仓库知识库生成失败'),
+        );
+      }
     } catch (err) {
       logger.error({ key, err: String(err) }, 'review 失败');
       db.insertReviewRun({
@@ -396,6 +420,141 @@ export class Pipeline {
     }
   }
 
+  // ---------- 仓库知识库 ----------
+
+  /** 注入提示词的仓库地图（截断到 8KB） */
+  private repoMapFor(rKey: string, conf: EffectiveRepoConfig): string {
+    if (!conf.knowledgeBase) return '（未启用）';
+    const entry = this.knowledge.get(rKey);
+    if (!entry) return '（暂无，首次 review 后自动生成）';
+    return truncateUtf8Bytes(entry.content, 8_000, '\n…（已截断）');
+  }
+
+  private async maybeGenerateKnowledge(
+    rKey: string,
+    worktree: string,
+    commit: string,
+  ): Promise<void> {
+    const { config, logger } = this.deps;
+    if (this.knowledge.isFresh(this.knowledge.get(rKey), config.knowledgeTtlDays)) return;
+    const prompt = loadPrompt(config.promptsDir, 'repo-map.md');
+    const result = await this.codexRun(worktree, prompt);
+    if (!result.ok || !result.output.trim()) {
+      throw new Error(result.error ?? 'repo-map 生成无输出');
+    }
+    this.knowledge.save(rKey, {
+      generatedAt: new Date().toISOString(),
+      commit,
+      content: result.output.trim(),
+    });
+    logger.info({ rKey }, '仓库知识库已更新');
+  }
+
+  // ---------- /fix ----------
+
+  async runFix(job: FixJob): Promise<void> {
+    const { config, db, ado, workspace, logger } = this.deps;
+    const pr = job.pr;
+    const key = toPrKey(pr);
+    const rKey = toRepoKey(pr);
+    const startedAt = Date.now();
+    const recordRun = (ok: boolean, error?: string) =>
+      db.insertReviewRun({
+        prKey: key,
+        repoKey: rKey,
+        kind: 'fix',
+        ok,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0,
+        findingsPosted: 0,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+        error,
+      });
+
+    const placeholder = await ado.replyToThread(pr, job.threadId, '🔧 正在实施修复，请稍候…');
+    const finish = (content: string) =>
+      ado.updateComment(pr, job.threadId, placeholder.id, content).catch(() => undefined);
+
+    let worktree: string | undefined;
+    try {
+      const fresh = await ado.getPullRequest(pr);
+      const current: PrInfo = { ...pr, ...parsePrResource(fresh, config.adoUrl), remoteUrl: pr.remoteUrl };
+      if (current.status !== 'active') throw new Error(`PR 状态为 ${current.status}，无法修复`);
+      if (!current.sourceCommit) throw new Error('PR 缺少源分支 commit');
+      const branch = current.sourceRefName.replace('refs/heads/', '');
+
+      await workspace.ensureMirror(rKey, pr.remoteUrl);
+      // 修复必须基于源分支（而不是预合并结果），产出的 commit 才能推回去
+      worktree = await workspace.createWorktree(
+        rKey,
+        current.sourceCommit,
+        `fix-${pr.pullRequestId}-${Date.now()}`,
+      );
+
+      const conf = this.effectiveRepoConfig(rKey, worktree);
+      if (!conf.allowFix) {
+        await finish(
+          '⛔ 该仓库未开启 /fix。在仓库根目录 `.ai-review.yml` 设置 `allowFix: true`（或联系 bot 管理员配置）后重试。',
+        );
+        recordRun(false, 'allowFix 未开启');
+        return;
+      }
+
+      const thread = await ado.getThread(pr, job.threadId);
+      const history = (thread.comments ?? [])
+        .filter((c) => !c.isDeleted && c.id !== placeholder.id && c.content)
+        .map((c) => `${c.author?.displayName ?? '未知'}：${c.content}`)
+        .join('\n---\n');
+      const anchor = thread.threadContext?.filePath
+        ? `${thread.threadContext.filePath.replace(/^\//, '')} 第 ${thread.threadContext.rightFileStart?.line ?? '?'} 行`
+        : '（该线程未锚定具体代码位置）';
+
+      const prompt = renderTemplate(loadPrompt(config.promptsDir, 'fix.md'), {
+        pr_title: current.title,
+        pr_description: current.description || '（无描述）',
+        source_branch: branch,
+        target_branch: current.targetRefName.replace('refs/heads/', ''),
+        thread_history: history || '（无历史评论）',
+        anchor,
+        instruction: job.instruction || '（无，按线程内容修复）',
+        repo_map: this.repoMapFor(rKey, conf),
+      });
+
+      // 修复需要写权限：覆盖为 workspace-write 沙箱
+      const result = await this.codexRun(worktree, prompt, { sandbox: 'workspace-write' });
+      if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
+      const summary = result.output.trim();
+
+      const title = `AI fix: PR #${pr.pullRequestId} thread ${job.threadId}`;
+      const commitId = await workspace.commitAll(worktree, `${title}\n\n${summary}`, {
+        name: config.botDisplayName,
+        email: `${config.botDisplayName}@ai-review.bot`,
+      });
+      if (!commitId) {
+        await finish(`ℹ️ 未做任何修改。\n\n${summary}`);
+        recordRun(true);
+        return;
+      }
+
+      await workspace.pushHead(worktree, pr.remoteUrl, branch);
+      await finish(
+        `✅ 已推送修复 \`${commitId.slice(0, 8)}\` 到 \`${branch}\`。\n\n${summary}\n\n_bot 将对该提交自动做一次增量 review。_`,
+      );
+      recordRun(true);
+      logger.info({ key, threadId: job.threadId, commitId }, '/fix 完成');
+    } catch (err) {
+      recordRun(false, String(err).slice(0, 500));
+      logger.error({ key, threadId: job.threadId, err: String(err) }, '/fix 失败');
+      await finish(
+        `⚠️ 修复失败：${String(err).slice(0, 300)}\n若源分支刚有新提交，请重新评论 \`/fix\` 再试。`,
+      );
+    } finally {
+      if (worktree) await workspace.removeWorktree(rKey, worktree);
+    }
+  }
+
   // ---------- 结果发布 ----------
 
   /** 返回实际发布的 finding 数（行内 + 归并进总评的） */
@@ -469,6 +628,7 @@ export class Pipeline {
     const summaryContent = this.formatSummaryComment(pr, kind, output, inline.length, overflow, {
       droppedByChallenge,
       autoTightened: conf.autoTightened,
+      allowFix: conf.allowFix,
     });
     const state = db.getPrState(key);
     let updated = false;
@@ -503,7 +663,7 @@ export class Pipeline {
     output: ReviewOutput,
     inlineCount: number,
     overflow: Finding[],
-    meta: { droppedByChallenge: number; autoTightened: boolean },
+    meta: { droppedByChallenge: number; autoTightened: boolean; allowFix: boolean },
   ): string {
     const parts: string[] = ['## 🤖 AI Code Review'];
     if (output.degraded) parts.push('> ⚠️ 结果解析降级：以下为模型原始输出。');
@@ -529,6 +689,7 @@ export class Pipeline {
       '<details><summary>支持的命令</summary>\n\n' +
         `- 评论 \`/review\` 强制重新全量 review\n` +
         `- 在任意线程 \`@${this.deps.config.botDisplayName} <问题>\` 进行追问\n` +
+        (meta.allowFix ? `- 在问题线程评论 \`/fix [额外指示]\` 让 bot 直接实施修复并推送\n` : '') +
         '</details>',
     );
     return parts.filter(Boolean).join('\n\n');
@@ -616,6 +777,7 @@ export class Pipeline {
         thread_history: history || '（无历史评论）',
         anchor,
         question: job.question,
+        repo_map: this.repoMapFor(rKey, this.effectiveRepoConfig(rKey, worktree)),
       });
 
       const result = await this.codexRun(worktree, prompt);
@@ -683,6 +845,8 @@ export class Pipeline {
       ignorePaths: yamlConf.ignorePaths ?? override.ignorePaths ?? [],
       focus: yamlConf.focus ?? override.focus ?? '',
       challenge: yamlConf.challenge ?? override.challenge ?? config.challengeEnabled,
+      allowFix: yamlConf.allowFix ?? override.allowFix ?? config.fixEnabled,
+      knowledgeBase: yamlConf.knowledgeBase ?? override.knowledgeBase ?? config.knowledgeEnabled,
       autoTightened,
     };
   }

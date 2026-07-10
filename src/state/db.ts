@@ -32,7 +32,7 @@ export interface FindingRow {
 export interface ReviewRunRow {
   prKey: string;
   repoKey: string;
-  kind: 'full' | 'incremental' | 'qa';
+  kind: 'full' | 'incremental' | 'qa' | 'fix';
   ok: boolean;
   durationMs: number;
   findingsTotal: number;

@@ -18,6 +18,8 @@ export interface RepoOverrides {
   ignorePaths?: string[];
   focus?: string;
   challenge?: boolean;
+  allowFix?: boolean;
+  knowledgeBase?: boolean;
   notify?: Partial<NotifyConfig>;
 }
 
@@ -56,6 +58,11 @@ export interface Config {
   challengeEnabled: boolean;
   /** 每周一 09:00（服务器时区）向 IM 渠道推送度量周报 */
   weeklyReportEnabled: boolean;
+  /** /fix 命令全局默认开关（默认关，安全起见按仓库 opt-in） */
+  fixEnabled: boolean;
+  /** 仓库知识库：首次 review 后生成架构摘要，注入后续 review/问答 */
+  knowledgeEnabled: boolean;
+  knowledgeTtlDays: number;
 
   notify: NotifyConfig;
   /** 按 project/repoName 覆盖，来自 BOT_CONFIG_FILE 指向的 JSON */
@@ -117,6 +124,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     challengeEnabled: env.CHALLENGE_ENABLED !== 'false',
     weeklyReportEnabled: env.WEEKLY_REPORT_ENABLED === 'true',
+    fixEnabled: env.FIX_ENABLED === 'true',
+    knowledgeEnabled: env.KNOWLEDGE_ENABLED !== 'false',
+    knowledgeTtlDays: num(env, 'KNOWLEDGE_TTL_DAYS', 14),
 
     notify: {
       rocketchatWebhookUrl: env.ROCKETCHAT_WEBHOOK_URL || undefined,

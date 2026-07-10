@@ -9,6 +9,10 @@
 {{conflict_note}}
 {{degraded_note}}
 
+## 仓库地图（先读，帮助快速定位）
+
+{{repo_map}}
+
 ## 本次新增变更（仅新 push 的部分）
 
 变更文件：

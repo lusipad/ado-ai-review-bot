@@ -149,9 +149,12 @@ function makeConfig(dataDir: string): Config {
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
-    // 端到端主链路测试关闭质疑 pass（否则每次 review 多一次 codex 调用），专门的测试单独开
+    // 端到端主链路测试关闭质疑 pass 和知识库（否则每次 review 多出额外 codex 调用），专门的测试单独开
     challengeEnabled: false,
     weeklyReportEnabled: false,
+    fixEnabled: false,
+    knowledgeEnabled: false,
+    knowledgeTtlDays: 14,
     notify: { rocketchatWebhookUrl: 'https://chat.local/hooks/x', events: ['review_completed', 'must_fix_found', 'job_failed'] },
     repoOverrides: {},
   };
@@ -407,6 +410,102 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     // 第二次 review 的提示词包含被拒意见与理由
     expect(reviewPrompts[1]).toContain('调用方未同步');
     expect(reviewPrompts[1]).toContain('业务上就是这样设计的');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('/fix：codex 改代码 → commit 并 push 到源分支 → 线程回复；未开启时拒绝', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-fix-'));
+    const config = { ...makeConfig(dataDir), fixEnabled: true };
+    // 独立分支承接 bot 的 push，避免影响其他用例
+    git(originDir, 'branch', 'fixable', 'feature');
+    const fixableHead = git(originDir, 'rev-parse', 'fixable');
+    const pr: PrInfo = {
+      ...prInfo(fixableHead, undefined),
+      pullRequestId: 7,
+      sourceRefName: 'refs/heads/fixable',
+    };
+    const ado = makeMockAdo(() => prResourceOf(pr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    const codexRun = async (worktree: string, prompt: string, opts?: { sandbox?: string }) => {
+      expect(prompt).toContain('实施一个具体修复');
+      expect(prompt).toContain('这里为什么要加参数 c？'); // 线程历史
+      expect(opts?.sandbox).toBe('workspace-write');
+      fs.writeFileSync(path.join(worktree, 'fixed.txt'), 'done\n');
+      return { ok: true, output: '把调用方改为三参调用，并补充了 fixed.txt。' };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    await pipeline.runFix({ pr, threadId: 55, commentId: 1, instruction: '按建议修复' });
+
+    // push 已到达 origin 的 fixable 分支
+    const newTip = git(originDir, 'rev-parse', 'fixable');
+    expect(newTip).not.toBe(fixableHead);
+    expect(git(originDir, 'log', '-1', '--format=%s', 'fixable')).toContain('AI fix');
+    expect(git(originDir, 'show', 'fixable:fixed.txt')).toBe('done');
+    // 占位评论被编辑为成功信息
+    const patch = ado.calls.find(
+      (c) => c.method === 'PATCH' && /\/threads\/55\/comments\/\d+\?/.test(c.url),
+    );
+    expect(patch?.body.content).toContain('✅ 已推送修复');
+    // 度量
+    expect(db.statsOverview('2000-01-01 00:00:00').byKind.fix).toBe(1);
+
+    // ---------- 未开启 allowFix → 拒绝且不 push ----------
+    const config2 = { ...makeConfig(dataDir), fixEnabled: false };
+    const ado2 = makeMockAdo(() => prResourceOf(pr));
+    const adoClient2 = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado2.fetchFn });
+    const pipeline2 = new Pipeline({
+      config: config2, db, ado: adoClient2, workspace, notify, logger: silentLogger,
+      codexRun: async () => ({ ok: true, output: '不应被调用' }),
+    });
+    await pipeline2.runFix({ pr, threadId: 55, commentId: 1, instruction: '' });
+    const patch2 = ado2.calls.find(
+      (c) => c.method === 'PATCH' && /\/threads\/55\/comments\/\d+\?/.test(c.url),
+    );
+    expect(patch2?.body.content).toContain('未开启 /fix');
+    expect(git(originDir, 'rev-parse', 'fixable')).toBe(newTip); // 没有新 push
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('仓库知识库：首次 review 后生成，之后注入提示词', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-kb-'));
+    const config = { ...makeConfig(dataDir), knowledgeEnabled: true };
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    const reviewPrompts: string[] = [];
+    let mapGenerations = 0;
+    const codexRun = async (_worktree: string, prompt: string) => {
+      if (prompt.includes('资深架构师')) {
+        mapGenerations++;
+        return { ok: true, output: '这是仓库地图内容 ABC123' };
+      }
+      reviewPrompts.push(prompt);
+      return { ok: true, output: JSON.stringify({ summary: 'ok', findings: [], resolvedThreadIds: [] }) };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    await pipeline.runFullReview(currentPr, 'PR 创建');
+    expect(reviewPrompts[0]).toContain('首次 review 后自动生成'); // 还没有地图
+    expect(mapGenerations).toBe(1);
+
+    await pipeline.runFullReview(currentPr, '/review 命令', true);
+    expect(reviewPrompts[1]).toContain('这是仓库地图内容 ABC123'); // 第二次注入
+    expect(mapGenerations).toBe(1); // 未过期，不重复生成
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

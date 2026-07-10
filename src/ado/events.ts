@@ -57,6 +57,7 @@ export type RouteAction =
   | { type: 'incremental_review'; pr: PrInfo }
   | { type: 'record_draft'; pr: PrInfo }
   | { type: 'qa'; pr: PrInfo; threadId: number; commentId: number; question: string }
+  | { type: 'fix'; pr: PrInfo; threadId: number; commentId: number; instruction: string }
   | { type: 'ignore'; reason: string };
 
 export interface PrInfo extends PrRef {
@@ -172,6 +173,14 @@ export function routeEvent(
       const stripped = stripMentions(content, ctx);
       if (/^\/review\b/i.test(stripped) || /^\/review\b/i.test(content.trim()))
         return { type: 'full_review', pr, reason: '/review 命令' };
+
+      // /fix [额外指示]：在当前线程语境下让 bot 实施修复（可带 @bot 前缀）
+      const fixMatch = /^\/fix\b\s*([\s\S]*)/i.exec(stripped) ?? /^\/fix\b\s*([\s\S]*)/i.exec(content.trim());
+      if (fixMatch) {
+        const threadId = threadIdFromComment(comment);
+        if (!threadId) return { type: 'ignore', reason: '评论事件缺少 thread 链接' };
+        return { type: 'fix', pr, threadId, commentId: comment.id, instruction: fixMatch[1].trim() };
+      }
 
       if (mentionsBot(content, ctx)) {
         const threadId = threadIdFromComment(comment);

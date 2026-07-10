@@ -20,7 +20,12 @@ function loadFixture(name: string): any {
 let tmpDir: string;
 let app: FastifyInstance;
 let db: StateDb;
-let pipeline: { runFullReview: ReturnType<typeof vi.fn>; runIncrementalReview: ReturnType<typeof vi.fn>; runQa: ReturnType<typeof vi.fn> };
+let pipeline: {
+  runFullReview: ReturnType<typeof vi.fn>;
+  runIncrementalReview: ReturnType<typeof vi.fn>;
+  runQa: ReturnType<typeof vi.fn>;
+  runFix: ReturnType<typeof vi.fn>;
+};
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-srv-'));
@@ -29,6 +34,7 @@ beforeEach(() => {
     runFullReview: vi.fn().mockResolvedValue(undefined),
     runIncrementalReview: vi.fn().mockResolvedValue(undefined),
     runQa: vi.fn().mockResolvedValue(undefined),
+    runFix: vi.fn().mockResolvedValue(undefined),
   };
   const config = {
     webhookSecret: SECRET,
@@ -114,6 +120,18 @@ describe('webhook 接收器', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(pipeline.runQa).not.toHaveBeenCalled();
     expect(pipeline.runFullReview).not.toHaveBeenCalled();
+  });
+
+  it('评论 /fix → fix 任务入队（review 串行域）', async () => {
+    const payload = loadFixture('pr-commented.json');
+    payload.resource.comment.content = '/fix 按建议修复';
+    const res = await inject(payload);
+    expect(res.json().action).toBe('fix');
+    await vi.waitFor(() => expect(pipeline.runFix).toHaveBeenCalledTimes(1));
+    expect(pipeline.runFix.mock.calls[0][0]).toMatchObject({
+      threadId: 5,
+      instruction: '按建议修复',
+    });
   });
 
   it('评论 /review → 手动全量（manual=true 可跳过 autoReview 关闭）', async () => {

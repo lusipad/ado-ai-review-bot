@@ -5,6 +5,10 @@
 - 标题：{{pr_title}}
 - 描述：{{pr_description}}
 
+## 仓库地图（先读，帮助快速定位）
+
+{{repo_map}}
+
 ## 评论线程锚定位置
 
 {{anchor}}
