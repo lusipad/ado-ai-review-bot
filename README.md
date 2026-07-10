@@ -1,6 +1,8 @@
 # ADO AI Review Bot
 
-Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做**深入 review**——不是把 diff 丢给模型，而是把 PR 的完整代码 checkout 到本地，让 AI 在真实代码库里 grep、读文件、追调用链，找出跨文件的问题；还能在评论区**对话式追问**。
+[![Release](https://img.shields.io/github/v/release/lusipad/ado-ai-review-bot)](https://github.com/lusipad/ado-ai-review-bot/releases) [![Tests](https://img.shields.io/badge/tests-130%20passed-brightgreen)](test) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做**深入 review**——不是把 diff 丢给模型，而是把 PR 的完整代码 checkout 到本地，让 AI 在真实代码库里 grep、读文件、追调用链，找出跨文件的问题；还能在评论区**对话式追问**，甚至**直接动手修**。
 
 | 你做什么 | bot 做什么 |
 |---|---|
@@ -15,30 +17,38 @@ Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做
 
 行内评论按严重级别标记：🔴 必须修复 / 🟡 建议 / 🔵 细节。bot 不投票、不阻塞审批（如需卡口，把分支策略里的 `ai-review` status 设为必需即可）。
 
-**信号质量三件套**（区别于「吵闹型」review bot 的核心设计）：
+**目录**：[能力总览](#能力总览) · [工作原理](#工作原理) · [快速开始](#快速开始) · [管理面板](#管理面板) · [配置参考](#配置参考) · [Review 行为定制](#review-行为定制) · [多模型](#多模型交叉-review) · [/fix](#fix让-bot-直接修) · [知识库与记忆](#仓库知识库与长期记忆) · [反馈学习与度量](#反馈学习与度量) · [IM 与群聊](#im-通知与群聊问答) · [离线部署](#离线--内网部署) · [验收清单](#上线验收清单) · [故障排查](#故障排查)
 
-- **质疑 pass**：每轮 review 产出的 findings 会交给一次独立的「证伪」复核——在代码库里实际查证，被证伪的意见直接丢弃，证实的标注「✅ 已二次复核」，拿不准的标注「⚪ 推断性发现」；
-- **反馈学习**：你把 bot 的意见线程标为 `Won't Fix`（可附一句理由），bot 会记住——之后同仓库不再提同类建议；某仓库 nit 级意见采纳率长期过低时自动折叠 nit，不再打扰；
-- **度量闭环**：`GET /stats` 随时查 review 次数、意见采纳率、误报拦截数（按仓库/时间窗），可选每周一自动推送周报到群，bot 有没有用，数据说话。
+## 能力总览
 
-**其它特性**：走 Service Hooks 事件推送，不占用 build agent、无轮询；多 PR 并行、同一 PR 串行去重、重复事件按 commit 幂等；**关联工作项注入**（review 会对照 PR 挂的需求/Bug 检查实现是否达标——ADO 生态独有的优势）；**git 历史意识**（agent 会用 `git log`/`blame` 考证历史决策再提意见）；**仓库知识库**（首次 review 后自动生成架构摘要，注入后续 review/问答，定位更快更准）；模型 API 瞬时失败自动重试；review 结果可推送 RocketChat / 企业微信；提示词、review 规则全部可配置。
+**评审深度**：完整代码库 agent 探索（追调用方、查测试、对照约定）· [多模型交叉 review](#多模型交叉-review)（🤝 双命中标注）· 关联工作项对照（实现是否达标）· `git log`/`blame` 历史考证 · 六种语言专项检查清单 · 👀 给人工审阅者的导读
+
+**信号质量**：质疑 pass 证伪复核（✅ 已复核 / ⚪ 推断性）· [反馈学习](#反馈学习与度量)（Won't Fix 不再重提、采纳率过低自动降噪）· 行内评论限量 + 指纹去重
+
+**记忆与学习**：[仓库知识库](#仓库知识库与长期记忆)（架构地图 + 项目术语表）· 长期记忆（约定/坑/决策，明文可编辑）· dream 每周自动整理并产出团队规范建议 · [沟通风格卡](#review-行为定制)（persona）
+
+**交互**：`@bot` 带代码依据的问答（支持**贴图提问**）· `/review` 强制重审 · [`/fix` 直接修复并 push](#fix让-bot-直接修)（带安全护栏）· [RocketChat 群聊问答](#im-通知与群聊问答) · must-fix 通知 @ 责任人
+
+**运营**：[管理面板](#管理面板) · [`/stats` 度量](#反馈学习与度量) + 周报 · 优雅停机 + 启动恢复 · 幂等去重 · 瞬时失败重试 · [一键接入脚本](#第-4-步配置-service-hooks) · [离线部署包](#离线--内网部署)
 
 ## 工作原理
 
 ```
-Azure DevOps Server 2022
-  │  Service Hooks Web Hooks（3 个订阅，带密钥）
-  ▼
-本服务 (Node.js)
-  ├─ webhook 接收器     校验密钥、路由事件、过滤 bot 自身评论、立即 ACK
-  ├─ 调度队列           每 PR 串行 + push 防抖 + 并发上限 + 问答优先通道
+Azure DevOps Server 2022                    RocketChat / 企业微信
+  │ Service Hooks（3 个订阅，带密钥）           ▲ 通知/@人    │ 群聊问答
+  ▼                                           │             ▼
+本服务 (Node.js) ─────────────────────────────┴──────────────────
+  ├─ webhook 接收器     校验密钥、事件路由、1.0 扁平评论补全、立即 ACK
+  ├─ 调度队列           每 PR 串行 + push 防抖 + 幂等 + 问答优先通道 + 优雅排水
   ├─ 仓库工作区         git mirror 缓存 + 每任务独立 worktree（checkout 预合并结果）
-  ├─ Codex 引擎         codex exec --sandbox read-only，输出结构化 JSON
-  ├─ ADO 客户端         总评/行内评论、线程回复、自动关线程、PR status
-  └─ SQLite 状态库      iteration 追踪、finding 去重
+  ├─ Codex 引擎         多 profile 并行 → 结果合并 → 质疑 pass 复核（读写沙箱隔离）
+  ├─ 知识与记忆         仓库地图快照 + 长期记忆积累 + dream 每周整理
+  ├─ ADO 客户端         总评/行内评论、线程回复、自动关线程、PR status、工作项
+  ├─ 管理面板           /admin 概览、队列实况、采纳率、最近任务
+  └─ SQLite 状态库      iteration 追踪、finding 指纹与反馈、度量
         │
         ▼
-内网 OpenAI 兼容 API（Codex CLI 的 model provider）
+内网 OpenAI 兼容 API × N（Codex CLI 的 model providers：主模型 / deepseek / …）
 ```
 
 ## 快速开始
@@ -340,6 +350,7 @@ curl -H "x-webhook-secret: <WEBHOOK_SECRET>" "http://<bot>:3000/stats?days=7&rep
 | `统计 [天数]` | review 次数、意见数、各仓库采纳率 |
 | `待处理` | 所有未解决的 must-fix（带 PR 链接） |
 | `架构 <项目/仓库>` | 该仓库的架构摘要（知识库缓存） |
+| `记忆 <项目/仓库>` | 该仓库积累的长期记忆 |
 
 ## 离线 / 内网部署
 
@@ -366,14 +377,23 @@ npm run package:docker   # 额外产出离线 Docker 镜像 release/ai-review-bo
 
 ## 上线验收清单
 
-1. 建一个含**跨文件缺陷**的测试 PR（如改了函数签名但没改某个调用方）→ 总评 + 行内评论能指出跨文件问题（验证「深入」而非只看 diff）；
-2. 草稿 PR 不触发；转正式后触发；
-3. 连续 push 两次 → 防抖窗口后只出**一次**增量 review，不重复旧意见；按意见修复后再 push → 旧 finding 线程被自动回复并标记已解决；
-4. 行内评论线程 `@ai-review-bot 这里为什么有风险？` → 同线程收到有代码依据的回复；
-5. `/review` → 强制全量重审；
-6. bot 自己的评论不引发新触发（无死循环）；
-7. 同时开 2~3 个 PR + 其中一个 review 进行中发 `@bot` 提问 → 互不串扰、问答不被长任务阻塞；
-8. （若配了 IM）review 完成后群里收到摘要；故意配错 webhook URL → review 正常完成，日志有告警。
+核心链路：
+
+1. 建一个含**跨文件缺陷**的测试 PR（如改了函数签名但没改某个调用方）→ 总评 + 行内评论能指出跨文件问题（验证「深入」而非只看 diff）；总评含**变更导览**与「👀 给人工审阅者」导读；
+2. 草稿 PR 不触发；转正式后触发；重复事件（同一 commit）不重复 review；
+3. 连续 push 两次 → 防抖窗口后只出**一次**增量 review，不重复旧意见；按意见修复后再 push → 旧 finding 线程被自动回复 ✅ 并标记已解决；
+4. **新开评论**（不要用 Reply 框）`@ai-review-bot 这里为什么有风险？` → 收到有代码依据的回复；贴一张截图再问 → 回答结合图片内容；
+5. `/review` 强制全量重审；bot 自己的评论不引发新触发（无死循环）；
+6. 同时开 2~3 个 PR + 其中一个 review 进行中发 `@bot` 提问 → 互不串扰、问答不被长任务阻塞。
+
+进阶功能：
+
+7. review 后 `data/knowledge/` 出现仓库地图 JSON；若模型有可沉淀的发现，`<仓库>-memory.md` 出现记忆条目；
+8. 把一条意见线程 Resolve 为 **Won't Fix** 并回复理由 → 下次 review 的同类建议不再出现；
+9. （若开 /fix）在问题线程评论 `/fix` → bot 推修复提交并触发对自己的增量 review；让它改 300+ 行 → 被护栏拒绝；
+10. （若配多模型）总评/行内出现「🤝 N 个模型独立发现」标注；
+11. （若配了 IM）review 完成群里收到摘要，must-fix 通知 @ 到 PR 作者；群里 `!review 状态` 秒回；故意配错 webhook URL → review 正常完成，日志有告警；
+12. 重启 bot 进程 → 在跑任务收尾或由启动恢复补跑，不留永久 pending 的 PR status。
 
 ## 故障排查
 
