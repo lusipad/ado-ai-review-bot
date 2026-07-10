@@ -78,6 +78,9 @@ export class Workspace {
       fs.mkdirSync(path.dirname(dir), { recursive: true });
       fs.rmSync(dir, { recursive: true, force: true });
       await this.git([
+        // agent 看到的必须与提交内容逐字节一致，不受部署机全局 autocrlf 影响
+        '-c',
+        'core.autocrlf=false',
         '--git-dir',
         this.mirrorPath(repoKey),
         'worktree',
