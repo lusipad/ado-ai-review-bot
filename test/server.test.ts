@@ -26,6 +26,7 @@ let pipeline: {
   runQa: ReturnType<typeof vi.fn>;
   runFix: ReturnType<typeof vi.fn>;
 };
+let adoMock: { getPullRequestById: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-srv-'));
@@ -42,12 +43,14 @@ beforeEach(() => {
     botDisplayName: 'ai-review-bot',
     adoUrl: 'https://ado.corp.local/DefaultCollection',
   } as unknown as Config;
+  adoMock = { getPullRequestById: vi.fn() };
   const scheduler = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 2, debounceMs: 30, logger: silentLogger });
   app = Fastify({ logger: false });
   registerRoutes(app, {
     config,
     db,
     scheduler,
+    ado: adoMock,
     pipeline: pipeline as unknown as Pipeline,
   } as unknown as AppDeps);
 });
@@ -100,6 +103,30 @@ describe('webhook 接收器', () => {
       timeout: 2000,
     });
     expect(pipeline.runFullReview).not.toHaveBeenCalled();
+  });
+
+  it('Server 2022 扁平评论事件（resourceVersion 1.0）→ 反查 PR 补全后正常路由', async () => {
+    const full = loadFixture('pr-commented.json');
+    // 1.0 形态：resource 就是 comment 本身，无 pullRequest 包装
+    const flat = { ...full, resourceVersion: '1.0', resource: full.resource.comment };
+    adoMock.getPullRequestById.mockResolvedValue(full.resource.pullRequest);
+
+    const res = await inject(flat);
+    expect(res.json().action).toBe('qa');
+    expect(adoMock.getPullRequestById).toHaveBeenCalledWith('4bc14d40-c903-45e2-872e-0462c7748079', 1);
+    await vi.waitFor(() => expect(pipeline.runQa).toHaveBeenCalledTimes(1));
+    expect(pipeline.runQa.mock.calls[0][0]).toMatchObject({ threadId: 5 });
+  });
+
+  it('扁平评论事件补全失败 → ACK 但不触发任务', async () => {
+    const full = loadFixture('pr-commented.json');
+    const flat = { ...full, resourceVersion: '1.0', resource: full.resource.comment };
+    adoMock.getPullRequestById.mockRejectedValue(new Error('ADO 404'));
+    const res = await inject(flat);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().error).toBe('hydrate failed');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(pipeline.runQa).not.toHaveBeenCalled();
   });
 
   it('评论 @bot → 问答任务', async () => {

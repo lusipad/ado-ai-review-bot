@@ -128,6 +128,23 @@ export function threadIdFromComment(comment: AdoCommentResource['comment']): num
   return m ? Number(m[1]) : undefined;
 }
 
+/**
+ * ADO Server 2022 实测：评论事件只有 resourceVersion 1.0 会投递（2.0 显示支持但从不触发），
+ * 且 1.0 的 resource 是扁平的 comment 对象（无 pullRequest 包装）。
+ * 识别这种形态并提取 repoId/prId，调用方据此反查 PR 后重组为 2.0 形态再路由。
+ */
+export function flatCommentRef(
+  resource: Record<string, unknown>,
+): { repoId: string; pullRequestId: number } | undefined {
+  if ((resource as unknown as AdoCommentResource).pullRequest) return undefined; // 已是 2.0 形态
+  const comment = resource as unknown as AdoCommentResource['comment'];
+  if (typeof comment?.id !== 'number' || !comment._links) return undefined;
+  const href = comment._links.threads?.href ?? '';
+  const m = href.match(/\/repositories\/([0-9a-f-]+)\/pullRequests\/(\d+)\//i);
+  if (!m) return undefined;
+  return { repoId: m[1], pullRequestId: Number(m[2]) };
+}
+
 export function routeEvent(
   event: ServiceHookEvent,
   ctx: RouteContext,

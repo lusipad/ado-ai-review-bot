@@ -2,7 +2,12 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { timingSafeEqual as cryptoTimingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { loadConfig, type Config } from './config';
-import { routeEvent, type ServiceHookEvent } from './ado/events';
+import {
+  routeEvent,
+  flatCommentRef,
+  EVENT_PR_COMMENTED,
+  type ServiceHookEvent,
+} from './ado/events';
 import { AdoClient } from './ado/client';
 import { StateDb } from './state/db';
 import { Workspace } from './repo/workspace';
@@ -66,8 +71,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.status(401).send({ error: 'unauthorized' });
     }
 
-    const event = req.body as ServiceHookEvent;
+    let event = req.body as ServiceHookEvent;
     if (!event?.eventType) return reply.status(400).send({ error: 'bad payload' });
+
+    // Server 2022 的评论事件只投递 1.0 扁平 comment，反查 PR 补全成 2.0 形态
+    if (event.eventType === EVENT_PR_COMMENTED) {
+      const ref = flatCommentRef(event.resource as Record<string, unknown>);
+      if (ref) {
+        try {
+          const prRes = await deps.ado.getPullRequestById(ref.repoId, ref.pullRequestId);
+          event = {
+            eventType: event.eventType,
+            resource: { comment: event.resource, pullRequest: prRes },
+          } as ServiceHookEvent;
+        } catch (err) {
+          req.log.error({ err: String(err), ...ref }, '扁平评论事件补全 PR 失败');
+          return reply.status(200).send({ ok: false, error: 'hydrate failed' });
+        }
+      }
+    }
 
     // 路由需要既有状态（draft 转换、commit 比对）；判定后立即 ACK，任务全部异步执行
     let action;

@@ -10,6 +10,8 @@ Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做
 | 任意线程评论 `@ai-review-bot 这里为什么有风险？` | 先回「🔍 正在分析」，随后编辑为带代码依据的回答 |
 | 问题线程评论 `/fix [额外指示]`（需按仓库开启） | bot 实施最小修复，commit 并 push 到 PR 源分支，再自动增量 review 自己的修复 |
 
+> ⚠️ **Server 2022 限制**：只有「新评论线程的首条评论」会触发事件，**线程内的回复不触发**。所以 `@bot` 提问、追问和 `/fix` 都要**新开评论**（在代码行上加新评论，或 PR 概览区新建评论），不要用已有线程的 Reply 框。bot 的回答仍会出现在你发起的那个线程里。
+
 行内评论按严重级别标记：🔴 必须修复 / 🟡 建议 / 🔵 细节。bot 不投票、不阻塞审批（如需卡口，把分支策略里的 `ai-review` status 设为必需即可）。
 
 **信号质量三件套**（区别于「吵闹型」review bot 的核心设计）：
@@ -109,7 +111,9 @@ npm start
 |---|---|---|---|
 | 1 | Pull request created | 仓库/分支按需 | 自动全量 review |
 | 2 | Pull request updated | **Change = Source branch updated** | push 后防抖增量 review |
-| 3 | Pull request commented on | — | `/review` 命令与 `@bot` 问答 |
+| 3 | Pull request commented on | **Resource version 选 1.0** | `/review`、`/fix` 命令与 `@bot` 问答 |
+
+> ⚠️ Server 2022 实测：评论事件订阅**必须选 Resource version 1.0**——2.0 显示「支持」但从不投递。1.0 的 payload 是扁平 comment（无 PR 信息），bot 会自动反查补全，无需额外配置。
 
 三个订阅的 Action 页统一填：
 
@@ -272,6 +276,8 @@ npm run package:docker   # 额外产出离线 Docker 镜像 release/ai-review-bo
 | webhook 返回 401 | 订阅里的密钥与 `WEBHOOK_SECRET` 不一致 |
 | 启动报 connectionData 401 | `ADO_PAT` 无效或 `ADO_URL` 不是 collection 一级；**检查系统环境变量里是否残留旧的 `ADO_PAT`**——`node --env-file` 不覆盖已存在的环境变量，旧值会顶掉 `.env` 里的新值 |
 | 创建订阅报「URL scheme must be HTTPS」 | ADO 不允许 HTTP URL 配 basic auth 密码，改用 `x-webhook-secret` HTTP header（见上文） |
+| `@bot` / `/fix` 没反应 | 评论订阅 Resource version 必须是 1.0；且必须**新开评论线程**（Server 2022 线程内回复不触发事件）；确认没有用 bot 账号自己发评论（会被自触发过滤） |
+| review 特别慢或卡死 | 部署账号的 `~/.codex/config.toml` 里若有个人 MCP server 会拖慢/挂起会话，用专用 `CODEX_HOME`（见 Windows 部署一节） |
 | review 一直 pending | bot 日志看 codex 是否超时（`CODEX_TIMEOUT_MS`）；手动 `codex exec` 验证模型连通 |
 | 行内评论位置不对 | 确认模型输出行号基于 worktree 实际文件；必要时降低 `maxInlineComments` 观察 |
 | PR 有冲突 | 无预合并 commit，bot 回退到源分支 review 并在总评顶部注明 |

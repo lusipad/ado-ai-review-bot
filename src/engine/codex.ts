@@ -76,7 +76,8 @@ export async function runCodex(
       return {
         ok: false,
         output,
-        error: `codex 退出码 ${exitInfo.code}: ${exitInfo.stderr.slice(0, 1000)}`,
+        // stderr 开头是 codex 的 banner 和提示词回显，真实错误在末尾
+        error: `codex 退出码 ${exitInfo.code}: ${exitInfo.stderr.slice(-1000)}`,
       };
     if (!output.trim()) return { ok: false, output, error: 'codex 没有产生输出' };
     return { ok: true, output };

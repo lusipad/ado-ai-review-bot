@@ -75,6 +75,11 @@ export class AdoClient {
     return this.request('GET', this.prPath(pr));
   }
 
+  /** collection 级按 repoId 查 PR（1.0 扁平评论事件补全用，此时还不知道项目名） */
+  getPullRequestById(repoId: string, pullRequestId: number): Promise<AdoPrResource> {
+    return this.request('GET', `/_apis/git/repositories/${repoId}/pullRequests/${pullRequestId}`);
+  }
+
   /**
    * PAT 所属账号的 identity（用于启动时自动获取 BOT_ACCOUNT_ID）。
    * 实测 ADO Server 2022 的 connectionData 带 api-version 会返回 400，必须裸调。
