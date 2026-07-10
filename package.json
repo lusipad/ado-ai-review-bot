@@ -1,6 +1,6 @@
 {
   "name": "ado-ai-review-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Azure DevOps Server 2022 AI code review bot: Service Hooks webhook + Codex CLI deep review + PR comment QA",
   "main": "dist/server.js",
   "scripts": {

@@ -2,6 +2,12 @@
 
 完整发布说明见 [GitHub Releases](https://github.com/lusipad/ado-ai-review-bot/releases)。
 
+## v0.3.0（2026-07-11）
+
+**Claude Code 双引擎**：`claude -p` 无头模式接入为第二种 agent 引擎——profile 支持 `engine:name` 格式（`claude`、`claude:opus`、`codex:deepseek`），可与 codex **交叉 review 同一个 PR**（不同 agent 架构的独立验证）；`REVIEW_ENGINE` 可整体切换默认引擎。安全映射：评审/问答限只读工具白名单，`/fix` 允许编辑但不放开任意 Bash；贴图提问自动转 Read 工具读取。
+
+其他：README 重组（能力总览 / 新架构图 / 12 项验收清单 / 目录）；补 MIT LICENSE。
+
 ## v0.2.0（2026-07-11）
 
 **更聪明的 review**：多模型交叉（codex profile，🤝 双命中标注）· 关联工作项对照 · 语言专项清单（C/C++、C#、TS/JS、Python、Java、Go）· git 历史考证 · 👀 人工审阅导读

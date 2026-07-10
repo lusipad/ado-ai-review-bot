@@ -1,6 +1,6 @@
 # ADO AI Review Bot
 
-[![Release](https://img.shields.io/github/v/release/lusipad/ado-ai-review-bot)](https://github.com/lusipad/ado-ai-review-bot/releases) [![Tests](https://img.shields.io/badge/tests-130%20passed-brightgreen)](test) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/lusipad/ado-ai-review-bot)](https://github.com/lusipad/ado-ai-review-bot/releases) [![Tests](https://img.shields.io/badge/tests-138%20passed-brightgreen)](test) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做**深入 review**——不是把 diff 丢给模型，而是把 PR 的完整代码 checkout 到本地，让 AI 在真实代码库里 grep、读文件、追调用链，找出跨文件的问题；还能在评论区**对话式追问**，甚至**直接动手修**。
 
