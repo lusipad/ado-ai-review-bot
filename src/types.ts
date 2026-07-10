@@ -43,6 +43,8 @@ export interface ReviewOutput {
   riskLevel?: string;
   /** 给人类 reviewer 的导读：最需要人工把关的位置与可略过的部分 */
   reviewerGuide?: string;
+  /** 本次 review 发现的、值得长期记住的仓库事实（代码里不明显的约定/坑/决策/术语） */
+  repoMemories?: Array<{ type?: string; text: string }>;
   findings: Finding[];
   /** 增量 review：模型判定已被新提交修复的旧 finding 线程 id */
   resolvedThreadIds: number[];

@@ -26,6 +26,7 @@ const HELP = [
   '- `统计 [天数]` — review 次数、意见与采纳率（默认 7 天）',
   '- `待处理` — 各仓库未解决的 must-fix 清单',
   '- `架构 <项目/仓库>` — 该仓库的架构摘要（知识库缓存）',
+  '- `记忆 <项目/仓库>` — 该仓库积累的长期记忆',
   '- `帮助` — 本说明',
 ].join('\n');
 
@@ -78,6 +79,14 @@ export function handleChatCommand(rawText: string, deps: ChatOpsDeps): string {
     const entry = deps.knowledge.get(repoKey);
     if (!entry) return `没有 \`${repoKey}\` 的知识库缓存（首次 review 后自动生成）。格式：项目/仓库，如 \`test/test\`。`;
     return truncateUtf8Bytes(`**${repoKey} 架构摘要**（${entry.generatedAt.slice(0, 10)} 生成）\n\n${entry.content}`, 3500, '\n…（已截断）');
+  }
+
+  const memMatch = /^(记忆|memory)\s+(\S+)/i.exec(text);
+  if (memMatch) {
+    const repoKey = memMatch[2];
+    const mem = deps.knowledge.memoriesText(repoKey);
+    if (!mem) return `\`${repoKey}\` 还没有长期记忆（review 过程中自动积累，每周日凌晨自动整理）。`;
+    return truncateUtf8Bytes(`**${repoKey} 的长期记忆**\n\n${mem}`, 3500, '\n…（已截断）');
   }
 
   return HELP;

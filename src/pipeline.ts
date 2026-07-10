@@ -15,10 +15,11 @@ import {
   runCodex,
   parseReviewOutput,
   parseChallengeVerdicts,
+  parseDreamOutput,
   type CodexRunResult,
 } from './engine/codex';
 import { NotifyDispatcher } from './notify';
-import { KnowledgeStore } from './knowledge';
+import { KnowledgeStore, normalizeMemoryType } from './knowledge';
 
 const SEVERITY_RANK: Record<Severity, number> = { 'must-fix': 0, suggestion: 1, nit: 2 };
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -85,7 +86,7 @@ export interface FixJob {
 export type CodexRunner = (
   worktree: string,
   prompt: string,
-  opts?: { sandbox?: string; profile?: string; images?: string[] },
+  opts?: { sandbox?: string; profile?: string; images?: string[]; skipGitCheck?: boolean },
 ) => Promise<CodexRunResult>;
 
 export interface PipelineDeps {
@@ -132,6 +133,8 @@ export function mergeReviewOutputs(outputs: ReviewOutput[]): ReviewOutput {
     findings: merged,
     resolvedThreadIds: [...resolved],
     riskLevel: maxRisk >= 0 ? RISK[maxRisk] : primary.riskLevel,
+    // 记忆取并集（去重由存储层做），每个模型最多贡献 3 条
+    repoMemories: outputs.flatMap((o) => o.repoMemories ?? []),
   };
 }
 
@@ -151,6 +154,7 @@ export class Pipeline {
             extraArgs: deps.config.codexExtraArgs,
             profile: opts?.profile,
             images: opts?.images,
+            skipGitCheck: opts?.skipGitCheck,
             logger: deps.logger,
           },
           worktree,
@@ -275,6 +279,7 @@ export class Pipeline {
               .join('\n')
           : '（无）',
         repo_map: this.repoMapFor(rKey, conf),
+        repo_memories: this.repoMemoriesFor(rKey, conf),
         work_items: workItemsText,
         language_checklists: this.languageChecklists(changedFiles),
         persona: conf.persona,
@@ -319,6 +324,12 @@ export class Pipeline {
         { key, findings: output.findings.length, droppedByChallenge, degraded: output.degraded },
         'review 完成',
       );
+
+      // 长期记忆：把本次 review 顺手发现的仓库事实沉淀下来
+      if (conf.knowledgeBase && output.repoMemories?.length) {
+        const added = this.knowledge.addMemories(rKey, output.repoMemories);
+        if (added > 0) logger.info({ rKey, added }, '仓库长期记忆已追加');
+      }
 
       // 知识库缺失/过期 → 复用本次 worktree 生成（失败不影响 review 结果）
       if (conf.knowledgeBase) {
@@ -392,7 +403,7 @@ export class Pipeline {
   private async codexRunWithRetry(
     worktree: string,
     prompt: string,
-    opts?: { sandbox?: string; profile?: string; images?: string[] },
+    opts?: { sandbox?: string; profile?: string; images?: string[]; skipGitCheck?: boolean },
   ): Promise<CodexRunResult> {
     const retries = this.deps.config.codexRetries;
     let last: CodexRunResult = { ok: false, output: '', error: '未执行' };
@@ -571,6 +582,12 @@ export class Pipeline {
     return truncateUtf8Bytes(entry.content, 8_000, '\n…（已截断）');
   }
 
+  /** 注入提示词的长期记忆 */
+  private repoMemoriesFor(rKey: string, conf: EffectiveRepoConfig): string {
+    if (!conf.knowledgeBase) return '（未启用）';
+    return this.knowledge.memoriesText(rKey) || '（暂无）';
+  }
+
   private async maybeGenerateKnowledge(
     rKey: string,
     worktree: string,
@@ -589,6 +606,92 @@ export class Pipeline {
       content: result.output.trim(),
     });
     logger.info({ rKey }, '仓库知识库已更新');
+  }
+
+  // ---------- dream：记忆整理 ----------
+
+  /** 有记忆可整理的仓库列表（server 每周调度用） */
+  dreamCandidates(): string[] {
+    return this.deps.db.listKnownRepoKeys().filter((rKey) => this.knowledge.getMemories(rKey).length > 0);
+  }
+
+  /**
+   * 用模型整理一个仓库的长期记忆：合并重复、淘汰过时、把高频问题归纳为约定。
+   * 纯文本任务，不 checkout 代码（记忆与代码的冲突留给下次 review 的「以代码为准」）。
+   */
+  async runDream(rKey: string): Promise<void> {
+    const { config, db, notify, logger } = this.deps;
+    const startedAt = Date.now();
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-dream-'));
+    try {
+      const before = this.knowledge.getMemories(rKey);
+      const rejected = db.listRejectedFindings(rKey, MAX_REJECTED_FEEDBACK);
+      const recent = db.listRecentFindingTitles(rKey, 20);
+      const prompt = renderTemplate(loadPrompt(config.promptsDir, 'dream.md'), {
+        repo_key: rKey,
+        memories: this.knowledge.memoriesText(rKey) || '（无）',
+        rejected_feedback: rejected.length
+          ? rejected.map((f) => `- ${f.file}: ${f.title}${f.note ? `（理由：${f.note}）` : ''}`).join('\n')
+          : '（无）',
+        recent_findings: recent.length
+          ? recent.map((f) => `- [${f.severity}/${f.status}] ${f.title}`).join('\n')
+          : '（无）',
+      });
+
+      const result = await this.codexRunWithRetry(scratch, prompt, { skipGitCheck: true });
+      if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
+      const dream = parseDreamOutput(result.output);
+      if (!dream) throw new Error('dream 输出无法解析，保留原记忆');
+
+      const today = new Date().toISOString().slice(0, 10);
+      this.knowledge.writeMemories(
+        rKey,
+        dream.memories.map((m) => ({
+          date: m.date ?? today,
+          type: normalizeMemoryType(m.type),
+          text: m.text,
+        })),
+      );
+      db.insertReviewRun({
+        prKey: rKey,
+        repoKey: rKey,
+        kind: 'dream',
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: before.length,
+        findingsPosted: dream.memories.length,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+      });
+      logger.info({ rKey, before: before.length, after: dream.memories.length }, 'dream 记忆整理完成');
+
+      if (dream.teamSuggestions) {
+        notify.dispatch({
+          type: 'weekly_report',
+          repoKey: rKey,
+          title: `🌙 ${rKey} 记忆整理：发现值得写进团队规范的模式`,
+          text: dream.teamSuggestions,
+        });
+      }
+    } catch (err) {
+      db.insertReviewRun({
+        prKey: rKey,
+        repoKey: rKey,
+        kind: 'dream',
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0,
+        findingsPosted: 0,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+        error: String(err).slice(0, 500),
+      });
+      logger.error({ rKey, err: String(err) }, 'dream 记忆整理失败（原记忆未动）');
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
   }
 
   // ---------- /fix ----------
@@ -661,6 +764,7 @@ export class Pipeline {
         anchor,
         instruction: job.instruction || '（无，按线程内容修复）',
         repo_map: this.repoMapFor(rKey, conf),
+        repo_memories: this.repoMemoriesFor(rKey, conf),
         persona: conf.persona,
       });
 
@@ -952,6 +1056,7 @@ export class Pipeline {
         anchor,
         question: job.question,
         repo_map: this.repoMapFor(rKey, qaConf),
+        repo_memories: this.repoMemoriesFor(rKey, qaConf),
         persona: qaConf.persona,
         images_note: imagePaths.length
           ? `（线程中附有 ${imagePaths.length} 张图片，已一并提供给你，请结合图片内容回答）`

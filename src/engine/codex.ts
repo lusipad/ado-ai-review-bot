@@ -13,6 +13,8 @@ export interface CodexOptions {
   profile?: string;
   /** 附加图片文件路径（codex -i，需模型支持视觉） */
   images?: string[];
+  /** 在非 git 目录运行（dream 整理等纯文本任务） */
+  skipGitCheck?: boolean;
   logger: Logger;
 }
 
@@ -45,6 +47,7 @@ export async function runCodex(
     '--output-last-message',
     outFile,
     ...(opts.profile && opts.profile !== 'default' ? ['-p', opts.profile] : []),
+    ...(opts.skipGitCheck ? ['--skip-git-repo-check'] : []),
     ...(opts.images ?? []).flatMap((img) => ['-i', img]),
     ...opts.extraArgs,
     '-', // 从 stdin 读提示词
@@ -121,6 +124,7 @@ export function parseReviewOutput(raw: string): ReviewOutput {
           walkthrough: typeof obj.walkthrough === 'string' ? obj.walkthrough : undefined,
           riskLevel: typeof obj.riskLevel === 'string' ? obj.riskLevel : undefined,
           reviewerGuide: typeof obj.reviewerGuide === 'string' ? obj.reviewerGuide : undefined,
+          repoMemories: sanitizeMemories(obj.repoMemories),
           findings: sanitizeFindings(obj.findings),
           resolvedThreadIds: Array.isArray(obj.resolvedThreadIds)
             ? obj.resolvedThreadIds.filter((n: unknown) => Number.isInteger(n))
@@ -173,6 +177,24 @@ export function parseChallengeVerdicts(raw: string): ChallengeVerdict[] | undefi
   return undefined;
 }
 
+function sanitizeMemories(input: unknown): Array<{ type?: string; text: string }> | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: Array<{ type?: string; text: string }> = [];
+  for (const m of input.slice(0, 3)) {
+    if (typeof m === 'string' && m.trim()) out.push({ text: m.trim() });
+    else if (
+      m &&
+      typeof m === 'object' &&
+      typeof (m as { text?: unknown }).text === 'string' &&
+      (m as { text: string }).text.trim()
+    ) {
+      const o = m as { type?: unknown; text: string };
+      out.push({ type: typeof o.type === 'string' ? o.type : undefined, text: o.text.trim() });
+    }
+  }
+  return out.length ? out : undefined;
+}
+
 function sanitizeFindings(input: unknown): Finding[] {
   if (!Array.isArray(input)) return [];
   const out: Finding[] = [];
@@ -192,6 +214,43 @@ function sanitizeFindings(input: unknown): Finding[] {
     });
   }
   return out;
+}
+
+export interface DreamOutput {
+  memories: Array<{ type?: string; text: string; date?: string }>;
+  /** 给团队的规范建议（markdown，可为空） */
+  teamSuggestions?: string;
+}
+
+/** 解析 dream 整理输出；失败返回 undefined（保留原记忆不动） */
+export function parseDreamOutput(raw: string): DreamOutput | undefined {
+  for (const c of jsonCandidates(raw)) {
+    try {
+      const obj = JSON.parse(c);
+      if (obj && typeof obj === 'object' && Array.isArray(obj.memories)) {
+        const memories: DreamOutput['memories'] = [];
+        for (const m of obj.memories) {
+          if (m && typeof m === 'object' && typeof m.text === 'string' && m.text.trim()) {
+            memories.push({
+              type: typeof m.type === 'string' ? m.type : undefined,
+              text: m.text.trim(),
+              date: typeof m.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(m.date) ? m.date : undefined,
+            });
+          }
+        }
+        return {
+          memories,
+          teamSuggestions:
+            typeof obj.teamSuggestions === 'string' && obj.teamSuggestions.trim()
+              ? obj.teamSuggestions.trim()
+              : undefined,
+        };
+      }
+    } catch {
+      // 尝试下一个候选
+    }
+  }
+  return undefined;
 }
 
 /** 提取文本中最后一个平衡的顶层 {...} */

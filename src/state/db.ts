@@ -35,7 +35,7 @@ export interface FindingRow {
 export interface ReviewRunRow {
   prKey: string;
   repoKey: string;
-  kind: 'full' | 'incremental' | 'qa' | 'fix';
+  kind: 'full' | 'incremental' | 'qa' | 'fix' | 'dream';
   ok: boolean;
   durationMs: number;
   findingsTotal: number;
@@ -317,6 +317,27 @@ export class StateDb {
       droppedByChallenge: agg.dropped ?? 0,
       byKind: Object.fromEntries(kinds.map((k) => [k.kind, k.n])),
     };
+  }
+
+  /** 见过的全部仓库（dream 整理扫描用） */
+  listKnownRepoKeys(): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT repo_key FROM review_runs
+           UNION SELECT DISTINCT repo_key FROM findings WHERE repo_key != ''`,
+        )
+        .all() as { repo_key: string }[]
+    ).map((r) => r.repo_key);
+  }
+
+  /** 近期 finding 标题与处置（dream 归纳高频模式用），新的在前 */
+  listRecentFindingTitles(repoKey: string, limit = 20): Array<{ title: string; severity: string; status: string }> {
+    return this.db
+      .prepare(
+        'SELECT title, severity, status FROM findings WHERE repo_key = ? ORDER BY created_at DESC LIMIT ?',
+      )
+      .all(repoKey, limit) as Array<{ title: string; severity: string; status: string }>;
   }
 
   /** 全部仓库的未处理 must-fix（聊天查询用），新的在前 */

@@ -158,6 +158,7 @@ function makeConfig(dataDir: string): Config {
     shutdownGraceMs: 1000,
     userMap: {},
     persona: '测试人格：直接了当，不打官腔。',
+    dreamEnabled: false,
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
@@ -652,6 +653,84 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     expect(fs.existsSync(seenImages[0])).toBe(false); // 用完已清理
     const patch = ado.calls.find((c) => c.method === 'PATCH' && /\/threads\/66\/comments\/\d+\?/.test(c.url));
     expect(patch?.body.content).toContain('空指针异常');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('长期记忆闭环：review 沉淀 → 注入下次 review → dream 整理重写', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-mem-'));
+    const config = {
+      ...makeConfig(dataDir),
+      knowledgeEnabled: true,
+      notify: {
+        rocketchatWebhookUrl: 'https://chat.local/hooks/x',
+        events: ['review_completed', 'must_fix_found', 'job_failed', 'weekly_report'] as const,
+      },
+    } as unknown as Config;
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notifyCalls: any[] = [];
+    const notify = new NotifyDispatcher(config, silentLogger, (async (_u: any, init: any) => {
+      notifyCalls.push(JSON.parse(init.body));
+      return new Response('{}');
+    }) as typeof fetch);
+
+    const prompts: string[] = [];
+    let mode: 'review' | 'dream' = 'review';
+    const codexRun = async (_wt: string, prompt: string, opts?: { skipGitCheck?: boolean }) => {
+      prompts.push(prompt);
+      if (mode === 'dream') {
+        expect(opts?.skipGitCheck).toBe(true);
+        expect(prompt).toContain('记忆整理器');
+        expect(prompt).toContain('金额单位是分'); // 现有记忆参与整理
+        return {
+          ok: true,
+          output: JSON.stringify({
+            memories: [{ type: '约定', text: '整理后：金额一律用分，禁止用元', date: '2026-07-01' }],
+            teamSuggestions: '- 建议在 AGENTS.md 声明金额单位约定',
+          }),
+        };
+      }
+      if (prompt.includes('资深架构师')) return { ok: true, output: '地图' };
+      return {
+        ok: true,
+        output: JSON.stringify({
+          summary: 'ok',
+          findings: [],
+          resolvedThreadIds: [],
+          repoMemories: [{ type: '坑', text: '金额单位是分不是元' }],
+        }),
+      };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    // 第一次 review：记忆被沉淀
+    await pipeline.runFullReview(currentPr, 'PR 创建');
+    const memFile = fs.readdirSync(path.join(dataDir, 'knowledge')).find((f) => f.endsWith('-memory.md'));
+    expect(memFile).toBeTruthy();
+    expect(fs.readFileSync(path.join(dataDir, 'knowledge', memFile!), 'utf8')).toContain('金额单位是分不是元');
+
+    // 第二次 review：提示词带上记忆
+    await pipeline.runFullReview(currentPr, '/review 命令', true);
+    const secondReviewPrompt = prompts.filter((p) => p.includes('评审要求')).at(-1)!;
+    expect(secondReviewPrompt).toContain('金额单位是分不是元');
+    expect(secondReviewPrompt).toContain('以代码为准');
+
+    // dream 整理：重写记忆 + 团队建议推送
+    mode = 'dream';
+    expect(pipeline.dreamCandidates()).toEqual(['Proj/Repo']);
+    await pipeline.runDream('Proj/Repo');
+    const after = fs.readFileSync(path.join(dataDir, 'knowledge', memFile!), 'utf8');
+    expect(after).toContain('整理后：金额一律用分');
+    expect(after).not.toContain('金额单位是分不是元'); // 旧条目被整理掉
+    expect(after).toContain('[2026-07-01]'); // 沿用原日期
+    await vi.waitFor(() => expect(JSON.stringify(notifyCalls)).toContain('AGENTS.md'));
+    expect(db.statsOverview('2000-01-01 00:00:00').byKind.dream).toBe(1);
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

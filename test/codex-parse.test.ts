@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseReviewOutput, parseChallengeVerdicts } from '../src/engine/codex';
+import { parseReviewOutput, parseChallengeVerdicts, parseDreamOutput } from '../src/engine/codex';
 import { renderTemplate } from '../src/engine/prompts';
 
 describe('parseReviewOutput', () => {
@@ -61,6 +61,36 @@ describe('parseReviewOutput', () => {
   it('resolvedThreadIds 过滤非整数', () => {
     const out = parseReviewOutput('{"summary":"s","findings":[],"resolvedThreadIds":[1,"x",2.5,3]}');
     expect(out.resolvedThreadIds).toEqual([1, 3]);
+  });
+});
+
+describe('repoMemories 与 parseDreamOutput', () => {
+  it('review 输出的 repoMemories：最多 3 条、清洗畸形项', () => {
+    const out = parseReviewOutput(JSON.stringify({
+      summary: 's',
+      findings: [],
+      repoMemories: [
+        { type: '坑', text: '金额单位是分' },
+        '字符串形式也接受',
+        { text: '' },
+        { type: '约定', text: '第四条被截掉' },
+      ],
+    }));
+    expect(out.repoMemories).toHaveLength(2);
+    expect(out.repoMemories![0]).toEqual({ type: '坑', text: '金额单位是分' });
+    expect(out.repoMemories![1]).toEqual({ text: '字符串形式也接受' });
+  });
+
+  it('parseDreamOutput：memories + teamSuggestions + 日期校验', () => {
+    const d = parseDreamOutput('整理过程……\n```json\n{"memories":[{"type":"约定","text":"合并后的","date":"2026-07-01"},{"text":"无日期","date":"07-01"}],"teamSuggestions":"- 建议写入 AGENTS.md"}\n```')!;
+    expect(d.memories).toHaveLength(2);
+    expect(d.memories[0].date).toBe('2026-07-01');
+    expect(d.memories[1].date).toBeUndefined(); // 非法日期丢弃
+    expect(d.teamSuggestions).toContain('AGENTS.md');
+  });
+
+  it('parseDreamOutput 解析失败 → undefined（原记忆不动）', () => {
+    expect(parseDreamOutput('散文')).toBeUndefined();
   });
 });
 

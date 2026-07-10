@@ -78,6 +78,8 @@ export interface Config {
   /** 仓库知识库：首次 review 后生成架构摘要，注入后续 review/问答 */
   knowledgeEnabled: boolean;
   knowledgeTtlDays: number;
+  /** dream：每周日 03:00 用模型整理各仓库长期记忆（合并/淘汰/归纳） */
+  dreamEnabled: boolean;
 
   notify: NotifyConfig;
   /** RocketChat outgoing webhook 的 token（双向问答鉴权），不配则该端点关闭 */
@@ -161,6 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fixEnabled: env.FIX_ENABLED === 'true',
     knowledgeEnabled: env.KNOWLEDGE_ENABLED !== 'false',
     knowledgeTtlDays: num(env, 'KNOWLEDGE_TTL_DAYS', 14),
+    dreamEnabled: env.DREAM_ENABLED !== 'false',
 
     notify: {
       rocketchatWebhookUrl: env.ROCKETCHAT_WEBHOOK_URL || undefined,

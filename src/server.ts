@@ -315,6 +315,28 @@ function splitPrKey(prKey: string): [string, string, number] | [] {
   return [project, repoName, prId];
 }
 
+/** 每周日 03:00（服务器本地时区）dream 整理各仓库长期记忆 */
+export function scheduleDream(deps: AppDeps, logger: Logger): void {
+  const tick = () => {
+    const delay = msUntilNextWeekly(new Date(), 0, 3);
+    const timer = setTimeout(() => {
+      try {
+        const repos = deps.pipeline.dreamCandidates();
+        logger.info({ repos: repos.length }, 'dream 记忆整理开始');
+        for (const rKey of repos) {
+          deps.scheduler.enqueueTask(`dream:${rKey}`, () => deps.pipeline.runDream(rKey));
+        }
+      } catch (err) {
+        logger.error({ err: String(err) }, 'dream 调度失败');
+      } finally {
+        tick();
+      }
+    }, delay);
+    timer.unref();
+  };
+  tick();
+}
+
 /** 每周一 09:00（服务器本地时区）推送度量周报；定时器 unref，不阻止进程退出 */
 export function scheduleWeeklyReport(deps: AppDeps, logger: Logger): void {
   const tick = () => {
@@ -353,6 +375,7 @@ async function main(): Promise<void> {
   }
   await deps.workspace.cleanupOrphans();
   if (config.weeklyReportEnabled) scheduleWeeklyReport(deps, app.log);
+  if (config.dreamEnabled && config.knowledgeEnabled) scheduleDream(deps, app.log);
 
   // 优雅停机：停接新任务 → 等在跑任务收尾 → 退出（超时任务由下次启动的恢复扫描补跑）
   let shuttingDown = false;
