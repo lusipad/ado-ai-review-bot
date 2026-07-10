@@ -25,6 +25,8 @@ let pipeline: {
   runIncrementalReview: ReturnType<typeof vi.fn>;
   runQa: ReturnType<typeof vi.fn>;
   runFix: ReturnType<typeof vi.fn>;
+  runChatQa: ReturnType<typeof vi.fn>;
+  chatQaAvailable: ReturnType<typeof vi.fn>;
 };
 let adoMock: { getPullRequestById: ReturnType<typeof vi.fn> };
 
@@ -36,6 +38,8 @@ beforeEach(() => {
     runIncrementalReview: vi.fn().mockResolvedValue(undefined),
     runQa: vi.fn().mockResolvedValue(undefined),
     runFix: vi.fn().mockResolvedValue(undefined),
+    runChatQa: vi.fn().mockResolvedValue(undefined),
+    chatQaAvailable: vi.fn().mockReturnValue(true),
   };
   const config = {
     webhookSecret: SECRET,
@@ -44,6 +48,7 @@ beforeEach(() => {
     adoUrl: 'https://ado.corp.local/DefaultCollection',
     dataDir: tmpDir,
     rocketchatOutgoingToken: 'rc-token',
+    channelRepos: {},
   } as unknown as Config;
   adoMock = { getPullRequestById: vi.fn() };
   const scheduler = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 2, debounceMs: 30, logger: silentLogger });
@@ -269,8 +274,52 @@ describe('RocketChat 双向问答', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().text).toContain('当前状态');
 
+    // 无 channel_id 的自由文本 → 退回帮助
     const help = await post({ token: 'rc-token', text: '!review 你好', trigger_word: '!review' });
     expect(help.json().text).toContain('我能回答');
+  });
+
+  it('自由问答：带 channel_id 且能定位仓库 → 异步 runChatQa（线程锚定）', async () => {
+    db.insertReviewRun({
+      prKey: 'Proj/Repo/1', repoKey: 'Proj/Repo', kind: 'full', ok: true, durationMs: 1,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    const res = await post({
+      token: 'rc-token',
+      text: '@review-bot 结算模块有没有并发风险？',
+      channel_id: 'room-1',
+      channel_name: 'dev',
+      message_id: 'msg-7',
+      user_name: 'lus',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().text).toBeUndefined(); // 占位走 REST，不走同步应答
+    await vi.waitFor(() => expect(pipeline.runChatQa).toHaveBeenCalledTimes(1));
+    expect(pipeline.runChatQa.mock.calls[0][0]).toMatchObject({
+      repoKey: 'Proj/Repo',
+      roomId: 'room-1',
+      tmid: 'msg-7',
+      userName: 'lus',
+      question: '结算模块有没有并发风险？',
+    });
+  });
+
+  it('自由问答：讨论前缀强制开讨论；定位不了仓库给 hint', async () => {
+    db.insertReviewRun({
+      prKey: 'A/B/1', repoKey: 'A/B', kind: 'full', ok: true, durationMs: 1,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    db.insertReviewRun({
+      prKey: 'C/D/1', repoKey: 'C/D', kind: 'full', ok: true, durationMs: 1,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    const hint = await post({ token: 'rc-token', text: '架构怎么样', channel_id: 'r', channel_name: 'x', message_id: 'm' });
+    expect(hint.json().text).toContain('带上仓库名');
+
+    const res = await post({ token: 'rc-token', text: '讨论 A/B 的整体架构', channel_id: 'r', channel_name: 'x', message_id: 'm' });
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(pipeline.runChatQa).toHaveBeenCalled());
+    expect(pipeline.runChatQa.mock.calls.at(-1)![0]).toMatchObject({ repoKey: 'A/B', forceDiscussion: true });
   });
 });
 

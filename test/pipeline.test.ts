@@ -739,6 +739,62 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }, 60_000);
 
+  it('群聊自由问答：短答编辑占位入线程，长答自动开讨论', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-chatqa-'));
+    const config = {
+      ...makeConfig(dataDir),
+      adoUrl: originDir, // remoteUrl 拼接会得到 originDir/Proj/_git/Repo，但 mirror 已按 rKey 缓存则不再 clone
+    } as unknown as Config;
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    // 预置 mirror（绕过 remoteUrl 拼接：先用本地路径 ensure 一次）
+    await workspace.ensureMirror('Proj/Repo', originDir);
+
+    const rcCalls: Array<{ url: string; body: any }> = [];
+    let discussionSeq = 0;
+    const rcFetch = (async (url: any, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : undefined;
+      rcCalls.push({ url: String(url), body });
+      if (String(url).includes('chat.postMessage')) return new Response(JSON.stringify({ success: true, message: { _id: 'ph-' + rcCalls.length } }));
+      if (String(url).includes('rooms.createDiscussion')) return new Response(JSON.stringify({ success: true, discussion: { _id: 'disc-' + ++discussionSeq } }));
+      return new Response(JSON.stringify({ success: true }));
+    }) as typeof fetch;
+    const { RocketChatClient } = await import('../src/rocketchat');
+    const rc = new RocketChatClient({ baseUrl: 'http://rc.local', userId: 'u', token: 't', fetchFn: rcFetch });
+
+    let answer = '简短结论：没有并发风险，checkout 单线程执行。';
+    const codexRun = async (_wt: string, prompt: string) => {
+      expect(prompt).toContain('群聊');
+      expect(prompt).toContain('开发者甲');
+      return { ok: true, output: answer };
+    };
+    const adoClient = new AdoClient({ baseUrl: 'https://x', pat: 'p', fetchFn: (async () => new Response('{}')) as typeof fetch });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun, rc });
+
+    // 短答案：占位 → 编辑为答案（同一线程）
+    await pipeline.runChatQa({ repoKey: 'Proj/Repo', question: '有并发风险吗', userName: '开发者甲', roomId: 'room1', tmid: 'msg-9' });
+    const placeholder = rcCalls.find((c) => c.url.includes('postMessage'));
+    expect(placeholder!.body.tmid).toBe('msg-9');
+    const update = rcCalls.find((c) => c.url.includes('chat.update'));
+    expect(update!.body.text).toContain('没有并发风险');
+    expect(rcCalls.some((c) => c.url.includes('createDiscussion'))).toBe(false);
+
+    // 长答案：自动开讨论 + 分段贴入 + 占位改为指引
+    rcCalls.length = 0;
+    answer = '长'.repeat(6000);
+    await pipeline.runChatQa({ repoKey: 'Proj/Repo', question: '全面分析架构', userName: '开发者甲', roomId: 'room1' });
+    expect(rcCalls.some((c) => c.url.includes('createDiscussion'))).toBe(true);
+    const discPosts = rcCalls.filter((c) => c.url.includes('postMessage') && c.body.roomId === 'disc-1');
+    expect(discPosts.length).toBeGreaterThanOrEqual(2); // 6000 字分段
+    const update2 = rcCalls.filter((c) => c.url.includes('chat.update')).at(-1);
+    expect(update2!.body.text).toContain('见讨论');
+
+    expect(db.statsOverview('2000-01-01 00:00:00').byKind.qa).toBe(2);
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
   it('长期记忆闭环：review 沉淀 → 注入下次 review → dream 整理重写', async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-mem-'));
     const config = {

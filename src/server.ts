@@ -18,7 +18,12 @@ import { prKey as toPrKey, type Logger } from './types';
 import { collectStats, formatWeeklyReport } from './stats';
 import { msUntilNextWeekly } from './util';
 import { ADMIN_HTML, buildOverview } from './admin';
-import { handleChatCommand, type RocketChatOutgoing } from './chatops';
+import {
+  handleChatCommand,
+  isStructuredCommand,
+  resolveRepoForChat,
+  type RocketChatOutgoing,
+} from './chatops';
 import { KnowledgeStore } from './knowledge';
 
 export interface AppDeps {
@@ -91,9 +96,38 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       }
       text = text.replace(/^@\S+\s*/, '');
       if (!text) return reply.status(200).send({});
-      const answer = handleChatCommand(text, chatDeps);
       req.log.info({ user: body.user_name, cmd: text.slice(0, 50) }, '聊天命令');
-      return reply.status(200).send({ text: answer });
+
+      // 结构化命令：秒回（出站 webhook 同步应答）
+      if (isStructuredCommand(text)) {
+        return reply.status(200).send({ text: handleChatCommand(text, chatDeps) });
+      }
+
+      // 自由问答：需要 RC REST 身份（占位、线程回复、讨论），异步跑 agent
+      if (deps.pipeline.chatQaAvailable() && body.channel_id) {
+        const forceDiscussion = /^(讨论|discuss)\s+/i.test(text);
+        const question = text.replace(/^(讨论|discuss)\s+/i, '').trim();
+        const resolved = resolveRepoForChat(
+          question,
+          body.channel_name,
+          deps.db.listKnownRepoKeys(),
+          config.channelRepos ?? {},
+        );
+        if (!resolved.repoKey) return reply.status(200).send({ text: resolved.hint });
+        const job = {
+          repoKey: resolved.repoKey,
+          question,
+          userName: body.user_name ?? '群友',
+          roomId: body.channel_id,
+          tmid: body.message_id,
+          forceDiscussion,
+        };
+        deps.scheduler.enqueueQa(() => deps.pipeline.runChatQa(job));
+        return reply.status(200).send({});
+      }
+
+      // 没配 REST 身份 → 退回帮助
+      return reply.status(200).send({ text: handleChatCommand(text, chatDeps) });
     });
   }
 

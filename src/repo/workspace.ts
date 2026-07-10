@@ -165,6 +165,11 @@ export class Workspace {
     );
   }
 
+  /** mirror 默认分支的 HEAD（自由问答 checkout 用） */
+  async headCommit(repoKey: string): Promise<string> {
+    return (await this.git(['--git-dir', this.mirrorPath(repoKey), 'rev-parse', 'HEAD'])).trim();
+  }
+
   /** commit 是否已在 mirror 中（避免不必要的 fetch） */
   async hasCommit(repoKey: string, commitId: string): Promise<boolean> {
     try {

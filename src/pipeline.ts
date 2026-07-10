@@ -21,6 +21,7 @@ import {
 import { runClaude } from './engine/claude';
 import { NotifyDispatcher } from './notify';
 import { KnowledgeStore, normalizeMemoryType } from './knowledge';
+import { RocketChatClient } from './rocketchat';
 
 const SEVERITY_RANK: Record<Severity, number> = { 'must-fix': 0, suggestion: 1, nit: 2 };
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -130,7 +131,23 @@ export interface PipelineDeps {
   logger: Logger;
   /** 可注入，测试时替换真实 codex 子进程 */
   codexRun?: CodexRunner;
+  /** 可注入，测试时替换 RC REST 客户端 */
+  rc?: RocketChatClient;
 }
+
+export interface ChatQaJob {
+  repoKey: string;
+  question: string;
+  userName: string;
+  roomId: string;
+  /** 触发消息 id：回复挂到它的线程下 */
+  tmid?: string;
+  forceDiscussion?: boolean;
+}
+
+/** 回答超过该长度自动转到讨论区（RC 单条消息上限 5000） */
+const DISCUSSION_THRESHOLD = 1500;
+const RC_MSG_CHUNK = 4200;
 
 /**
  * 多模型 findings 合并：指纹相同，或同文件近邻行号（±2）且同严重度，视为同一问题；
@@ -173,8 +190,15 @@ export function mergeReviewOutputs(outputs: ReviewOutput[]): ReviewOutput {
 export class Pipeline {
   private readonly codexRun: CodexRunner;
   private readonly knowledge: KnowledgeStore;
+  private readonly rc?: RocketChatClient;
 
   constructor(private readonly deps: PipelineDeps) {
+    const { rocketchatUrl, rocketchatBotUserId, rocketchatBotToken } = deps.config;
+    this.rc =
+      deps.rc ??
+      (rocketchatUrl && rocketchatBotUserId && rocketchatBotToken
+        ? new RocketChatClient({ baseUrl: rocketchatUrl, userId: rocketchatBotUserId, token: rocketchatBotToken })
+        : undefined);
     this.codexRun =
       deps.codexRun ??
       ((worktree, prompt, opts) => {
@@ -655,6 +679,84 @@ export class Pipeline {
       content: result.output.trim(),
     });
     logger.info({ rKey }, '仓库知识库已更新');
+  }
+
+  // ---------- 群聊自由问答 ----------
+
+  /** RC REST 是否配置（server 路由据此决定自由问答是否可用） */
+  chatQaAvailable(): boolean {
+    return this.rc !== undefined;
+  }
+
+  /**
+   * 群聊自由分析：checkout 仓库默认分支，agent 带知识库+记忆自由探索后回答。
+   * 短答案编辑占位消息（在提问线程里）；长答案自动创建讨论。
+   */
+  async runChatQa(job: ChatQaJob): Promise<void> {
+    const rc = this.rc;
+    if (!rc) return;
+    const { config, db, workspace, logger } = this.deps;
+    const rKey = job.repoKey;
+    const startedAt = Date.now();
+    const recordRun = (ok: boolean, error?: string) =>
+      db.insertReviewRun({
+        prKey: `chat:${rKey}`,
+        repoKey: rKey,
+        kind: 'qa',
+        ok,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0,
+        findingsPosted: 0,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+        error,
+      });
+
+    const placeholder = await rc.postMessage(job.roomId, '🔍 收到，正在分析（约 1~2 分钟）…', job.tmid);
+    let worktree: string | undefined;
+    try {
+      const [project, repoName] = rKey.split('/');
+      const remoteUrl = `${config.adoUrl}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repoName)}`;
+      await workspace.ensureMirror(rKey, remoteUrl);
+      const head = await workspace.headCommit(rKey);
+      worktree = await workspace.createWorktree(rKey, head, `chat-${Date.now()}`);
+
+      const conf = this.effectiveRepoConfig(rKey, worktree);
+      const prompt = renderTemplate(loadPrompt(config.promptsDir, 'chat-qa.md'), {
+        repo_key: rKey,
+        persona: conf.persona,
+        repo_map: this.repoMapFor(rKey, conf),
+        repo_memories: this.repoMemoriesFor(rKey, conf),
+        user_name: job.userName,
+        question: job.question,
+      });
+
+      const result = await this.codexRunWithRetry(worktree, prompt);
+      if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
+      const answer = result.output.trim();
+
+      if (job.forceDiscussion || answer.length > DISCUSSION_THRESHOLD) {
+        const title = `分析：${job.question.slice(0, 60)}`;
+        const d = await rc.createDiscussion(job.roomId, title);
+        for (let i = 0; i < answer.length; i += RC_MSG_CHUNK) {
+          await rc.postMessage(d.roomId, answer.slice(i, i + RC_MSG_CHUNK));
+        }
+        await rc.updateMessage(job.roomId, placeholder.msgId, `✅ 分析完成，完整内容见讨论「${title}」。`);
+      } else {
+        await rc.updateMessage(job.roomId, placeholder.msgId, answer);
+      }
+      recordRun(true);
+      logger.info({ rKey, question: job.question.slice(0, 60) }, '群聊问答完成');
+    } catch (err) {
+      recordRun(false, String(err).slice(0, 500));
+      logger.error({ rKey, err: String(err) }, '群聊问答失败');
+      await rc
+        .updateMessage(job.roomId, placeholder.msgId, `⚠️ 分析失败：${String(err).slice(0, 300)}`)
+        .catch(() => undefined);
+    } finally {
+      if (worktree) await workspace.removeWorktree(rKey, worktree);
+    }
   }
 
   // ---------- dream：记忆整理 ----------

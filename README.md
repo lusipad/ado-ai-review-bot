@@ -201,6 +201,7 @@ npm start
 | `WEEKLY_REPORT_ENABLED` | | `false` | 每周一 09:00 推送度量周报到 IM 渠道 |
 | `ROCKETCHAT_WEBHOOK_URL` | | — | RocketChat Incoming Webhook（通知推送） |
 | `ROCKETCHAT_OUTGOING_TOKEN` | | — | RocketChat Outgoing Webhook token（群聊问答，不配则关闭） |
+| `ROCKETCHAT_URL` / `ROCKETCHAT_BOT_USER_ID` / `ROCKETCHAT_BOT_TOKEN` | | — | RC REST 身份（自由问答/线程/讨论；三项齐全才启用） |
 | `WECOM_WEBHOOK_KEY` | | — | 企业微信群机器人 key |
 | `NOTIFY_EVENTS` | | 全部 | `review_completed,must_fix_found,job_failed,weekly_report` |
 
@@ -362,15 +363,29 @@ curl -H "x-webhook-secret: <WEBHOOK_SECRET>" "http://<bot>:3000/stats?days=7&rep
 - Event trigger: Message Sent；Channel 按需；Trigger Words 如 `!review`；
 - URLs: `http://<bot>:3000/webhook/rocketchat`；Token 自定义随机串，同时填入 `.env` 的 `ROCKETCHAT_OUTGOING_TOKEN`。
 
-之后群里发 `!review <命令>`（结构化查询，不调模型、秒回）：
+之后群里发 `!review <命令>` 或 `@review-bot <问题>`：
 
-| 命令 | 回答 |
+| 输入 | 行为 |
 |---|---|
-| `状态` | 正在处理的 PR、排队/防抖/问答通道 |
-| `统计 [天数]` | review 次数、意见数、各仓库采纳率 |
-| `待处理` | 所有未解决的 must-fix（带 PR 链接） |
-| `架构 <项目/仓库>` | 该仓库的架构摘要（知识库缓存） |
-| `记忆 <项目/仓库>` | 该仓库积累的长期记忆 |
+| `状态` | 秒回：正在处理的 PR、排队/防抖/问答通道 |
+| `统计 [天数]` | 秒回：review 次数、意见数、各仓库采纳率 |
+| `待处理` | 秒回：所有未解决的 must-fix（带 PR 链接） |
+| `架构 <项目/仓库>` | 秒回：该仓库的架构摘要（知识库缓存） |
+| `记忆 <项目/仓库>` | 秒回：该仓库积累的长期记忆 |
+| **任意问题**（如 `结算折扣是向下取整还是四舍五入？`） | bot 进代码库分析后**在提问线程里**回答（约 1~2 分钟，带知识库+记忆） |
+| `讨论 <问题>` | 强制完整分析并**自动创建讨论**放长文，主线程只留指引 |
+
+**自由问答需要 RC REST 身份**（bot 主动发消息/线程回复/建讨论的能力，纯 webhook 做不到）：在 RC 里建一个 bot 用户（如 `review-bot`）→ 用它登录生成 Personal Access Token → 填三个变量：
+
+```bash
+ROCKETCHAT_URL=http://rc-host:3000
+ROCKETCHAT_BOT_USER_ID=<bot 用户的 userId>
+ROCKETCHAT_BOT_TOKEN=<PAT>
+```
+
+仓库定位规则：问题里写了仓库名（`test/test`）直接用；否则用频道绑定（`BOT_CONFIG_FILE` 里 `"channelRepos": { "dev-channel": "Proj/Repo" }`）；只有一个已知仓库时自动兜底。回答长度超过 1500 字自动转讨论区。不配 REST 身份时自由问题退回帮助提示（结构化命令不受影响）。
+
+> RC 跑在 Docker 而 bot 在宿主机时，出站 webhook 的 URL 用 `http://host.docker.internal:<bot端口>/webhook/rocketchat`。
 
 ## 离线 / 内网部署
 

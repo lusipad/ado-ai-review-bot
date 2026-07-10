@@ -92,10 +92,16 @@ export interface Config {
   notify: NotifyConfig;
   /** RocketChat outgoing webhook 的 token（双向问答鉴权），不配则该端点关闭 */
   rocketchatOutgoingToken?: string;
+  /** RC REST 身份（自由问答/线程/讨论需要）；三项齐全才启用 */
+  rocketchatUrl?: string;
+  rocketchatBotUserId?: string;
+  rocketchatBotToken?: string;
   /** 按 project/repoName 覆盖，来自 BOT_CONFIG_FILE 指向的 JSON */
   repoOverrides: Record<string, RepoOverrides>;
   /** ADO 账号（uniqueName 或 displayName）→ RocketChat 用户名，通知 @ 人用；来自 BOT_CONFIG_FILE */
   userMap: Record<string, string>;
+  /** RC 频道名 → 默认仓库（自由问答没写明仓库时用）；来自 BOT_CONFIG_FILE */
+  channelRepos: Record<string, string>;
 }
 
 /** 默认沟通风格卡：决定 review 评论 / 问答 / 修复说明的语气（可用 PERSONA 或 .ai-review.yml persona 覆盖） */
@@ -122,10 +128,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const configFile = env.BOT_CONFIG_FILE;
   let repoOverrides: Record<string, RepoOverrides> = {};
   let userMap: Record<string, string> = {};
+  let channelRepos: Record<string, string> = {};
   if (configFile && fs.existsSync(configFile)) {
     const parsed = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     repoOverrides = parsed.repoOverrides ?? {};
     userMap = parsed.userMap ?? {};
+    channelRepos = parsed.channelRepos ?? {};
   }
 
   const events = (env.NOTIFY_EVENTS ?? 'review_completed,must_fix_found,job_failed,weekly_report')
@@ -184,7 +192,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       events,
     },
     rocketchatOutgoingToken: env.ROCKETCHAT_OUTGOING_TOKEN || undefined,
+    rocketchatUrl: env.ROCKETCHAT_URL || undefined,
+    rocketchatBotUserId: env.ROCKETCHAT_BOT_USER_ID || undefined,
+    rocketchatBotToken: env.ROCKETCHAT_BOT_TOKEN || undefined,
     repoOverrides,
     userMap,
+    channelRepos,
   };
 }

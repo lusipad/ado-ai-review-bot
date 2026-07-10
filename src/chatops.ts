@@ -18,6 +18,9 @@ export interface RocketChatOutgoing {
   text?: string;
   bot?: unknown;
   trigger_word?: string;
+  channel_id?: string;
+  channel_name?: string;
+  message_id?: string;
 }
 
 const HELP = [
@@ -27,8 +30,39 @@ const HELP = [
   '- `待处理` — 各仓库未解决的 must-fix 清单',
   '- `架构 <项目/仓库>` — 该仓库的架构摘要（知识库缓存）',
   '- `记忆 <项目/仓库>` — 该仓库积累的长期记忆',
+  '- **任意问题** — 我会进代码库分析后回答（如 `结算模块有没有并发风险？`）',
+  '- `讨论 <问题>` — 强制在讨论区输出完整分析',
   '- `帮助` — 本说明',
 ].join('\n');
+
+/** 是否结构化命令（秒回、不调模型）；不是则走自由问答 */
+export function isStructuredCommand(text: string): boolean {
+  return /^(状态|status|统计|stats|待处理|must-?fix|架构|arch\s|记忆|memory\s|帮助|help)($|\s)/i.test(
+    text.trim(),
+  );
+}
+
+/**
+ * 自由问答的仓库定位：问题里明确写了 → 频道默认绑定 → 全局唯一仓库。
+ * 定不了返回 hint 让提问者补充。
+ */
+export function resolveRepoForChat(
+  text: string,
+  channelName: string | undefined,
+  known: string[],
+  channelRepos: Record<string, string>,
+): { repoKey?: string; hint?: string } {
+  const lower = text.toLowerCase();
+  const explicit = known.find((k) => lower.includes(k.toLowerCase()));
+  if (explicit) return { repoKey: explicit };
+  if (channelName && channelRepos[channelName]) return { repoKey: channelRepos[channelName] };
+  if (known.length === 1) return { repoKey: known[0] };
+  return {
+    hint:
+      '请在问题里带上仓库名（如 `test/test 结算模块有没有风险？`），或让管理员在 BOT_CONFIG_FILE 的 channelRepos 里给本频道绑定默认仓库。' +
+      (known.length ? `\n我知道的仓库：${known.slice(0, 10).join('、')}` : ''),
+  };
+}
 
 /** prKey = project/repo/prId → PR 页面链接 */
 function prUrl(adoUrl: string, prKey: string): string {
