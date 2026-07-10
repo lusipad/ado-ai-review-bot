@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Pipeline, mergeReviewOutputs } from '../src/pipeline';
+import { Pipeline, mergeReviewOutputs, isProtectedPath } from '../src/pipeline';
 import { StateDb } from '../src/state/db';
 import { Workspace } from '../src/repo/workspace';
 import { AdoClient } from '../src/ado/client';
@@ -166,6 +166,8 @@ function makeConfig(dataDir: string): Config {
     challengeEnabled: false,
     weeklyReportEnabled: false,
     fixEnabled: false,
+    fixMaxFiles: 10,
+    fixMaxLines: 300,
     knowledgeEnabled: false,
     knowledgeTtlDays: 14,
     notify: { rocketchatWebhookUrl: 'https://chat.local/hooks/x', events: ['review_completed', 'must_fix_found', 'job_failed'] },
@@ -208,6 +210,20 @@ describe('mergeReviewOutputs', () => {
     const a = out({ findings: [{ file: 'a.ts', line: 10, severity: 'must-fix', title: 'x', detail: '' }] });
     const b = out({ findings: [{ file: 'a.ts', line: 10, severity: 'nit', title: 'y', detail: '' }] });
     expect(mergeReviewOutputs([a, b]).findings).toHaveLength(2);
+  });
+});
+
+describe('isProtectedPath（/fix 禁改清单）', () => {
+  it('评审配置、团队规范、CI 配置受保护；普通代码不受', () => {
+    expect(isProtectedPath('.ai-review.yml')).toBe(true);
+    expect(isProtectedPath('sub/dir/.ai-review.yaml')).toBe(true);
+    expect(isProtectedPath('AGENTS.md')).toBe(true);
+    expect(isProtectedPath('azure-pipelines.yml')).toBe(true);
+    expect(isProtectedPath('ci/azure-pipelines-release.yml')).toBe(true);
+    expect(isProtectedPath('.github/workflows/build.yml')).toBe(true);
+    expect(isProtectedPath('.gitlab-ci.yml')).toBe(true);
+    expect(isProtectedPath('src/app.ts')).toBe(false);
+    expect(isProtectedPath('docs/AGENTS-guide.md')).toBe(false);
   });
 });
 
@@ -653,6 +669,68 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     expect(fs.existsSync(seenImages[0])).toBe(false); // 用完已清理
     const patch = ado.calls.find((c) => c.method === 'PATCH' && /\/threads\/66\/comments\/\d+\?/.test(c.url));
     expect(patch?.body.content).toContain('空指针异常');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('/fix 护栏：超规模拒绝、受保护文件拒绝、PR 分支 yaml 无法自我提权', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-guard-'));
+    const config = { ...makeConfig(dataDir), fixEnabled: true, fixMaxFiles: 2, fixMaxLines: 20 };
+    git(originDir, 'branch', 'guarded', 'feature');
+    const guardedHead = git(originDir, 'rev-parse', 'guarded');
+    const pr: PrInfo = {
+      ...prInfo(guardedHead, undefined),
+      pullRequestId: 9,
+      sourceRefName: 'refs/heads/guarded',
+    };
+    const ado = makeMockAdo(() => prResourceOf(pr));
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    let writeMode: 'huge' | 'protected' = 'huge';
+    const codexRun = async (worktree: string) => {
+      if (writeMode === 'huge') {
+        fs.writeFileSync(path.join(worktree, 'big.txt'), Array(50).fill('line').join('\n'));
+      } else {
+        fs.mkdirSync(path.join(worktree, '.github', 'workflows'), { recursive: true });
+        fs.writeFileSync(path.join(worktree, '.github', 'workflows', 'evil.yml'), 'on: push\n');
+      }
+      return { ok: true, output: '改好了' };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    // 超行数上限 → 拒绝，分支无新提交
+    await pipeline.runFix({ pr, threadId: 70, commentId: 1, instruction: '重构' });
+    let patch = ado.calls.filter((c) => c.method === 'PATCH' && /threads\/70/.test(c.url)).at(-1);
+    expect(patch?.body.content).toContain('超出护栏');
+    expect(git(originDir, 'rev-parse', 'guarded')).toBe(guardedHead);
+
+    // 受保护文件 → 拒绝
+    writeMode = 'protected';
+    await pipeline.runFix({ pr, threadId: 71, commentId: 1, instruction: '加个 CI' });
+    patch = ado.calls.filter((c) => c.method === 'PATCH' && /threads\/71/.test(c.url)).at(-1);
+    expect(patch?.body.content).toContain('受保护文件');
+    expect(git(originDir, 'rev-parse', 'guarded')).toBe(guardedHead);
+
+    // PR 分支 yaml 写 allowFix: true → 不再生效（fixEnabled=false 时仍拒绝）
+    git(originDir, 'checkout', 'guarded', '-q');
+    fs.writeFileSync(path.join(originDir, '.ai-review.yml'), 'allowFix: true\n');
+    git(originDir, 'add', '.');
+    git(originDir, 'commit', '-m', 'try self-authorize', '-q');
+    const newHead = git(originDir, 'rev-parse', 'HEAD');
+    git(originDir, 'checkout', 'main', '-q');
+    const pr2 = { ...pr, sourceCommit: newHead };
+    const config2 = { ...config, fixEnabled: false };
+    const pipeline2 = new Pipeline({
+      config: config2, db, ado: adoClient, workspace, notify, logger: silentLogger,
+      codexRun: async () => ({ ok: true, output: '不应执行到修改' }),
+    });
+    await pipeline2.runFix({ pr: pr2, threadId: 72, commentId: 1, instruction: '' });
+    patch = ado.calls.filter((c) => c.method === 'PATCH' && /threads\/72/.test(c.url)).at(-1);
+    expect(patch?.body.content).toContain('未开启 /fix');
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

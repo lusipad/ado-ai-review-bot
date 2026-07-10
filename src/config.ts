@@ -75,6 +75,9 @@ export interface Config {
   weeklyReportEnabled: boolean;
   /** /fix 命令全局默认开关（默认关，安全起见按仓库 opt-in） */
   fixEnabled: boolean;
+  /** /fix 护栏：改动文件数/行数超限直接拒绝 push */
+  fixMaxFiles: number;
+  fixMaxLines: number;
   /** 仓库知识库：首次 review 后生成架构摘要，注入后续 review/问答 */
   knowledgeEnabled: boolean;
   knowledgeTtlDays: number;
@@ -161,6 +164,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     challengeEnabled: env.CHALLENGE_ENABLED !== 'false',
     weeklyReportEnabled: env.WEEKLY_REPORT_ENABLED === 'true',
     fixEnabled: env.FIX_ENABLED === 'true',
+    fixMaxFiles: num(env, 'FIX_MAX_FILES', 10),
+    fixMaxLines: num(env, 'FIX_MAX_LINES', 300),
     knowledgeEnabled: env.KNOWLEDGE_ENABLED !== 'false',
     knowledgeTtlDays: num(env, 'KNOWLEDGE_TTL_DAYS', 14),
     dreamEnabled: env.DREAM_ENABLED !== 'false',

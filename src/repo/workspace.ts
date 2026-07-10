@@ -112,6 +112,24 @@ export class Workspace {
       .catch((err) => this.logger.warn({ err: String(err), worktreePath }, '清理 worktree 失败'));
   }
 
+  /** 暂存全部改动并返回统计（/fix 护栏用）；文件列表含改名/新增/删除 */
+  async stageAndStats(
+    worktreePath: string,
+  ): Promise<{ files: string[]; changedLines: number }> {
+    await this.git(['add', '-A'], worktreePath);
+    const numstat = await this.git(['diff', '--cached', '--numstat'], worktreePath);
+    const files: string[] = [];
+    let changedLines = 0;
+    for (const line of numstat.split('\n')) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line.trim());
+      if (!m) continue;
+      // 二进制文件 numstat 为 "-"，按 0 行计但文件数照算
+      changedLines += (m[1] === '-' ? 0 : Number(m[1])) + (m[2] === '-' ? 0 : Number(m[2]));
+      files.push(m[3]);
+    }
+    return { files, changedLines };
+  }
+
   /** 暂存并提交 worktree 中的全部改动；无改动返回 undefined，否则返回新 commit id */
   async commitAll(
     worktreePath: string,

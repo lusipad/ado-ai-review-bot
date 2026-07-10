@@ -35,7 +35,11 @@ const MAX_REJECTED_FEEDBACK = 15;
 const TIGHTEN_MIN_RESOLVED = 8;
 const TIGHTEN_ACCEPT_RATE = 0.25;
 
-/** 仓库内 .ai-review.yml 支持的字段 */
+/**
+ * 仓库内 .ai-review.yml 支持的字段。
+ * 注意：该文件读自 PR 源分支（作者可控），所以这里**不允许**出现提权类开关——
+ * allowFix 只认 bot 侧配置（FIX_ENABLED / repoOverrides），防止作者开 PR 自我授权。
+ */
 interface RepoYamlConfig {
   autoReview?: boolean;
   maxInlineComments?: number;
@@ -43,10 +47,22 @@ interface RepoYamlConfig {
   ignorePaths?: string[];
   focus?: string;
   challenge?: boolean;
-  allowFix?: boolean;
   knowledgeBase?: boolean;
   profiles?: string[];
   persona?: string;
+}
+
+/** /fix 不允许修改的路径：评审配置、团队规范、CI 流水线（防自我提权与注入放大） */
+const PROTECTED_PATTERNS = [
+  /(^|\/)\.ai-review\.ya?ml$/i,
+  /(^|\/)AGENTS\.md$/i,
+  /(^|\/)azure-pipelines[^/]*\.ya?ml$/i,
+  /(^|\/)\.github\//i,
+  /(^|\/)\.gitlab-ci[^/]*\.ya?ml$/i,
+];
+
+export function isProtectedPath(file: string): boolean {
+  return PROTECTED_PATTERNS.some((p) => p.test(file));
 }
 
 /** 变更文件扩展名 → prompts/checklists/ 下的专项清单 */
@@ -60,7 +76,8 @@ const CHECKLIST_BY_EXT: Record<string, string> = {
   '.go': 'go',
 };
 
-interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge' | 'allowFix' | 'knowledgeBase'>> {
+interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge' | 'knowledgeBase'>> {
+  allowFix: boolean;
   ignorePaths: string[];
   focus: string;
   profiles: string[];
@@ -773,6 +790,30 @@ export class Pipeline {
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
       const summary = result.output.trim();
 
+      // 护栏：改动规模与受保护文件检查，超限不 push（防误操作与提示词注入放大）
+      const stats = await workspace.stageAndStats(worktree);
+      if (stats.files.length === 0) {
+        await finish(`ℹ️ 未做任何修改。\n\n${summary}`);
+        recordRun(true);
+        return;
+      }
+      const protectedHit = stats.files.filter((f) => isProtectedPath(f));
+      if (protectedHit.length > 0) {
+        await finish(
+          `⛔ 已放弃修复：改动涉及受保护文件（${protectedHit.join('、')}）。评审配置与 CI 配置不允许由 /fix 修改，请人工处理。`,
+        );
+        recordRun(false, `护栏拦截：受保护文件 ${protectedHit[0]}`);
+        return;
+      }
+      if (stats.files.length > config.fixMaxFiles || stats.changedLines > config.fixMaxLines) {
+        await finish(
+          `⛔ 已放弃修复：改动规模超出护栏（${stats.files.length} 个文件 / ${stats.changedLines} 行，` +
+            `上限 ${config.fixMaxFiles} 文件 / ${config.fixMaxLines} 行）。请人工处理，或把 /fix 指令拆小。`,
+        );
+        recordRun(false, `护栏拦截：${stats.files.length} 文件 / ${stats.changedLines} 行`);
+        return;
+      }
+
       const title = `AI fix: PR #${pr.pullRequestId} thread ${job.threadId}`;
       const commitId = await workspace.commitAll(worktree, `${title}\n\n${summary}`, {
         name: config.botDisplayName,
@@ -1129,7 +1170,8 @@ export class Pipeline {
       ignorePaths: yamlConf.ignorePaths ?? override.ignorePaths ?? [],
       focus: yamlConf.focus ?? override.focus ?? '',
       challenge: yamlConf.challenge ?? override.challenge ?? config.challengeEnabled,
-      allowFix: yamlConf.allowFix ?? override.allowFix ?? config.fixEnabled,
+      // 安全：allowFix 不读 PR 分支里的 yaml（自我提权面），只认 bot 侧配置
+      allowFix: override.allowFix ?? config.fixEnabled,
       knowledgeBase: yamlConf.knowledgeBase ?? override.knowledgeBase ?? config.knowledgeEnabled,
       profiles: yamlConf.profiles ?? override.profiles ?? config.reviewProfiles,
       persona: yamlConf.persona ?? override.persona ?? config.persona,
