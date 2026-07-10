@@ -319,6 +319,17 @@ export class StateDb {
     };
   }
 
+  /** 全部仓库的未处理 must-fix（聊天查询用），新的在前 */
+  listOpenMustFix(limit = 20): FindingRow[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM findings WHERE status = 'open' AND severity = 'must-fix' ORDER BY created_at DESC LIMIT ?",
+        )
+        .all(limit) as Record<string, unknown>[]
+    ).map((r) => this.rowToFinding(r));
+  }
+
   /** 最近的任务记录（管理面板用），新的在前 */
   listRecentRuns(limit = 50): Array<ReviewRunRow & { id: number; createdAt: string }> {
     return (

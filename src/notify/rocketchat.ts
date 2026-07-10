@@ -17,7 +17,10 @@ export class RocketChatNotifier implements Notifier {
   ) {}
 
   async send(event: NotifyEvent): Promise<void> {
-    const lines = [`${EMOJI[event.type]} **${event.title}**`, event.text];
+    const mention = event.mentionUsernames?.length
+      ? event.mentionUsernames.map((u) => `@${u}`).join(' ') + ' '
+      : '';
+    const lines = [`${mention}${EMOJI[event.type]} **${event.title}**`, event.text];
     if (event.url) lines.push(`[打开 PR](${event.url})`);
     const res = await this.fetchFn(this.webhookUrl, {
       method: 'POST',

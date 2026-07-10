@@ -854,12 +854,22 @@ export class Pipeline {
       url,
     });
     if (mustFix.length > 0) {
+      // 责任到人：按 userMap 把 PR 作者映射为 RocketChat 用户名
+      const { userMap } = this.deps.config;
+      const author = pr.createdBy;
+      const rcUser =
+        (author?.uniqueName && userMap[author.uniqueName]) ||
+        (author?.displayName && userMap[author.displayName]) ||
+        undefined;
       notify.dispatch({
         type: 'must_fix_found',
         repoKey: rKey,
         title: `发现 ${mustFix.length} 个必须修复问题：${pr.title}`,
-        text: mustFix.map((f) => `- ${f.file}:${f.line} ${f.title}`).join('\n'),
+        text:
+          mustFix.map((f) => `- ${f.file}:${f.line} ${f.title}`).join('\n') +
+          (!rcUser && author?.displayName ? `\n作者：${author.displayName}` : ''),
         url,
+        mentionUsernames: rcUser ? [rcUser] : undefined,
       });
     }
   }

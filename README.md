@@ -183,7 +183,8 @@ npm start
 | `KNOWLEDGE_ENABLED` | | `true` | 仓库知识库（架构摘要注入 review/问答） |
 | `KNOWLEDGE_TTL_DAYS` | | `14` | 知识库刷新周期 |
 | `WEEKLY_REPORT_ENABLED` | | `false` | 每周一 09:00 推送度量周报到 IM 渠道 |
-| `ROCKETCHAT_WEBHOOK_URL` | | — | RocketChat Incoming Webhook |
+| `ROCKETCHAT_WEBHOOK_URL` | | — | RocketChat Incoming Webhook（通知推送） |
+| `ROCKETCHAT_OUTGOING_TOKEN` | | — | RocketChat Outgoing Webhook token（群聊问答，不配则关闭） |
 | `WECOM_WEBHOOK_KEY` | | — | 企业微信群机器人 key |
 | `NOTIFY_EVENTS` | | 全部 | `review_completed,must_fix_found,job_failed,weekly_report` |
 
@@ -284,11 +285,38 @@ curl -H "x-webhook-secret: <WEBHOOK_SECRET>" "http://<bot>:3000/stats?days=7&rep
 
 返回 review 次数（按类型）、失败数、平均耗时、发布意见数、must-fix 数、质疑 pass 拦截数、各仓库采纳率。`WEEKLY_REPORT_ENABLED=true` 时每周一 09:00 自动推送同样内容的周报到已配置的 IM 渠道。
 
-## IM 通知
+## IM 通知与群聊问答
+
+**通知推送**：
 
 - **RocketChat**：管理 → Integrations → New Incoming Webhook → URL 填入 `ROCKETCHAT_WEBHOOK_URL`；
 - **企业微信**：群 → 添加群机器人 → key（或完整 URL）填入 `WECOM_WEBHOOK_KEY`；
 - 两者可同时启用；`NOTIFY_EVENTS` 控制推送哪些事件；通知失败只记日志，不影响 review。
+
+**must-fix 通知 @ 责任人**（RocketChat）：在 `BOT_CONFIG_FILE` 指向的 JSON 里配 ADO 账号（uniqueName 或显示名）→ RC 用户名映射，发现必修问题时直接 @ PR 作者：
+
+```json
+{
+  "userMap": {
+    "zhangsan@corp.local": "zhang.san",
+    "李四": "li.si"
+  }
+}
+```
+
+**RocketChat 群聊问答**（双向）：管理 → Integrations → **New Outgoing Webhook**：
+
+- Event trigger: Message Sent；Channel 按需；Trigger Words 如 `!review`；
+- URLs: `http://<bot>:3000/webhook/rocketchat`；Token 自定义随机串，同时填入 `.env` 的 `ROCKETCHAT_OUTGOING_TOKEN`。
+
+之后群里发 `!review <命令>`（结构化查询，不调模型、秒回）：
+
+| 命令 | 回答 |
+|---|---|
+| `状态` | 正在处理的 PR、排队/防抖/问答通道 |
+| `统计 [天数]` | review 次数、意见数、各仓库采纳率 |
+| `待处理` | 所有未解决的 must-fix（带 PR 链接） |
+| `架构 <项目/仓库>` | 该仓库的架构摘要（知识库缓存） |
 
 ## 离线 / 内网部署
 

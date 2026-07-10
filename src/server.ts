@@ -18,6 +18,8 @@ import { prKey as toPrKey, type Logger } from './types';
 import { collectStats, formatWeeklyReport } from './stats';
 import { msUntilNextWeekly } from './util';
 import { ADMIN_HTML, buildOverview } from './admin';
+import { handleChatCommand, type RocketChatOutgoing } from './chatops';
+import { KnowledgeStore } from './knowledge';
 
 export interface AppDeps {
   config: Config;
@@ -66,6 +68,34 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const days = Math.min(365, Math.max(1, Number(q.days) || 30));
     return collectStats(deps.db, days, q.repo || undefined);
   });
+
+  // RocketChat 双向问答（outgoing webhook）：token 鉴权、bot 消息防回环
+  if (config.rocketchatOutgoingToken) {
+    const chatDeps = {
+      db: deps.db,
+      scheduler: deps.scheduler,
+      adoUrl: config.adoUrl,
+      knowledge: new KnowledgeStore(path.join(config.dataDir, 'knowledge')),
+    };
+    app.post('/webhook/rocketchat', async (req, reply) => {
+      const body = (req.body ?? {}) as RocketChatOutgoing;
+      if (!body.token || !timingSafeEqual(body.token, config.rocketchatOutgoingToken!)) {
+        return reply.status(401).send({ error: 'unauthorized' });
+      }
+      // 集成账号/机器人自己的消息不回应，防止回环
+      if (body.bot) return reply.status(200).send({});
+      let text = (body.text ?? '').trim();
+      // 剥掉触发词（RC 配置的 trigger word 或 @机器人 前缀）
+      if (body.trigger_word && text.toLowerCase().startsWith(body.trigger_word.toLowerCase())) {
+        text = text.slice(body.trigger_word.length).trim();
+      }
+      text = text.replace(/^@\S+\s*/, '');
+      if (!text) return reply.status(200).send({});
+      const answer = handleChatCommand(text, chatDeps);
+      req.log.info({ user: body.user_name, cmd: text.slice(0, 50) }, '聊天命令');
+      return reply.status(200).send({ text: answer });
+    });
+  }
 
   // 管理面板（只读）：浏览器 basic auth，用户名任意、密码=WEBHOOK_SECRET
   app.get('/admin', async (req, reply) => {

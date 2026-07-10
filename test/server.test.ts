@@ -42,6 +42,8 @@ beforeEach(() => {
     botAccountId: BOT_ID,
     botDisplayName: 'ai-review-bot',
     adoUrl: 'https://ado.corp.local/DefaultCollection',
+    dataDir: tmpDir,
+    rocketchatOutgoingToken: 'rc-token',
   } as unknown as Config;
   adoMock = { getPullRequestById: vi.fn() };
   const scheduler = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 2, debounceMs: 30, logger: silentLogger });
@@ -244,6 +246,31 @@ describe('管理面板与重启恢复', () => {
       pullRequestId: 9,
       repoId: 'repo-guid-9',
     });
+  });
+});
+
+describe('RocketChat 双向问答', () => {
+  const post = (payload: unknown) =>
+    app.inject({ method: 'POST', url: '/webhook/rocketchat', payload: payload as object });
+
+  it('token 不对 → 401', async () => {
+    const res = await post({ token: 'wrong', text: '状态' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('bot 消息 → 不回应（防回环）', async () => {
+    const res = await post({ token: 'rc-token', text: '状态', bot: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().text).toBeUndefined();
+  });
+
+  it('命令响应 + trigger word/@ 前缀剥离', async () => {
+    const res = await post({ token: 'rc-token', text: '!review @ai-review-bot 状态', trigger_word: '!review', user_name: 'lus' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().text).toContain('当前状态');
+
+    const help = await post({ token: 'rc-token', text: '!review 你好', trigger_word: '!review' });
+    expect(help.json().text).toContain('我能回答');
   });
 });
 

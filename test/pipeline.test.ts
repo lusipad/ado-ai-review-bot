@@ -154,6 +154,7 @@ function makeConfig(dataDir: string): Config {
     codexRetries: 1,
     reviewProfiles: ['default'],
     shutdownGraceMs: 1000,
+    userMap: {},
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),

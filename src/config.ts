@@ -76,8 +76,12 @@ export interface Config {
   knowledgeTtlDays: number;
 
   notify: NotifyConfig;
+  /** RocketChat outgoing webhook 的 token（双向问答鉴权），不配则该端点关闭 */
+  rocketchatOutgoingToken?: string;
   /** 按 project/repoName 覆盖，来自 BOT_CONFIG_FILE 指向的 JSON */
   repoOverrides: Record<string, RepoOverrides>;
+  /** ADO 账号（uniqueName 或 displayName）→ RocketChat 用户名，通知 @ 人用；来自 BOT_CONFIG_FILE */
+  userMap: Record<string, string>;
 }
 
 function req(env: NodeJS.ProcessEnv, name: string): string {
@@ -97,9 +101,11 @@ function num(env: NodeJS.ProcessEnv, name: string, def: number): number {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const configFile = env.BOT_CONFIG_FILE;
   let repoOverrides: Record<string, RepoOverrides> = {};
+  let userMap: Record<string, string> = {};
   if (configFile && fs.existsSync(configFile)) {
     const parsed = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     repoOverrides = parsed.repoOverrides ?? {};
+    userMap = parsed.userMap ?? {};
   }
 
   const events = (env.NOTIFY_EVENTS ?? 'review_completed,must_fix_found,job_failed,weekly_report')
@@ -150,6 +156,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       wecomWebhookKey: env.WECOM_WEBHOOK_KEY || undefined,
       events,
     },
+    rocketchatOutgoingToken: env.ROCKETCHAT_OUTGOING_TOKEN || undefined,
     repoOverrides,
+    userMap,
   };
 }

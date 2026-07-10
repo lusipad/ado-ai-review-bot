@@ -13,6 +13,8 @@ export interface NotifyEvent {
   title: string;
   text: string;
   url?: string;
+  /** 需要 @ 的 RocketChat 用户名（不含 @；企业微信暂不支持 markdown @） */
+  mentionUsernames?: string[];
 }
 
 export interface Notifier {

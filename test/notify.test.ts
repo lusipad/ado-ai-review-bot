@@ -37,6 +37,13 @@ describe('RocketChatNotifier', () => {
     const n = new RocketChatNotifier('https://x', (async () => new Response('', { status: 500 })) as typeof fetch);
     await expect(n.send(event)).rejects.toThrow('HTTP 500');
   });
+
+  it('mentionUsernames → 文首 @ 人', async () => {
+    const cap: any = {};
+    const n = new RocketChatNotifier('https://chat.corp.local/hooks/abc', okFetch(cap));
+    await n.send({ ...event, mentionUsernames: ['zhang.san', 'li.si'] });
+    expect(cap.body.text.startsWith('@zhang.san @li.si ')).toBe(true);
+  });
 });
 
 describe('WeComNotifier', () => {

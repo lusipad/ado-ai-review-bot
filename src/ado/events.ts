@@ -70,6 +70,8 @@ export interface PrInfo extends PrRef {
   sourceCommit?: string;
   targetCommit?: string;
   mergeCommit?: string;
+  /** PR 作者（通知 @ 人用） */
+  createdBy?: { displayName?: string; uniqueName?: string };
 }
 
 export interface RouteContext {
@@ -99,6 +101,9 @@ export function parsePrResource(res: AdoPrResource, adoUrl: string): PrInfo {
     sourceCommit: res.lastMergeSourceCommit?.commitId,
     targetCommit: res.lastMergeTargetCommit?.commitId,
     mergeCommit: res.lastMergeCommit?.commitId,
+    createdBy: res.createdBy
+      ? { displayName: res.createdBy.displayName, uniqueName: res.createdBy.uniqueName }
+      : undefined,
   };
 }
 
