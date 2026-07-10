@@ -1,0 +1,44 @@
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "notificationId": 2,
+  "id": "af07be1b-f3ad-44c8-a7f1-c4835f2df06b",
+  "eventType": "git.pullrequest.updated",
+  "publisherId": "tfs",
+  "message": { "text": "Jamal Hartnett updated pull request 1" },
+  "resource": {
+    "repository": {
+      "id": "4bc14d40-c903-45e2-872e-0462c7748079",
+      "name": "Fabrikam",
+      "project": {
+        "id": "6ce954b1-ce1f-45d1-b94d-e6bf2464ba2c",
+        "name": "Fabrikam",
+        "state": "wellFormed"
+      },
+      "defaultBranch": "refs/heads/main",
+      "remoteUrl": "https://ado.corp.local/DefaultCollection/Fabrikam/_git/Fabrikam"
+    },
+    "pullRequestId": 1,
+    "status": "active",
+    "isDraft": false,
+    "createdBy": {
+      "id": "54d125f7-69f7-4191-904f-c5b96b6261c8",
+      "displayName": "Jamal Hartnett"
+    },
+    "title": "my first pull request",
+    "description": " - test2\r\n",
+    "sourceRefName": "refs/heads/mytopic",
+    "targetRefName": "refs/heads/main",
+    "mergeStatus": "succeeded",
+    "lastMergeSourceCommit": {
+      "commitId": "aaaa0000bbbb1111cccc2222dddd3333eeee4444"
+    },
+    "lastMergeTargetCommit": {
+      "commitId": "a511f535b1ea495ee0c903badb68fbc83772c882"
+    },
+    "lastMergeCommit": {
+      "commitId": "ffff5555aaaa6666bbbb7777cccc8888dddd9999"
+    }
+  },
+  "resourceVersion": "1.0",
+  "createdDate": "2026-07-09T16:20:14.7746185Z"
+}

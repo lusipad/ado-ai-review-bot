@@ -1,0 +1,49 @@
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "notificationId": 1,
+  "id": "2ab4e3d3-b7a6-425e-92b1-5a9982c1269e",
+  "eventType": "git.pullrequest.created",
+  "publisherId": "tfs",
+  "message": { "text": "Jamal Hartnett created pull request 1 in Fabrikam" },
+  "resource": {
+    "repository": {
+      "id": "4bc14d40-c903-45e2-872e-0462c7748079",
+      "name": "Fabrikam",
+      "url": "https://ado.corp.local/DefaultCollection/_apis/git/repositories/4bc14d40-c903-45e2-872e-0462c7748079",
+      "project": {
+        "id": "6ce954b1-ce1f-45d1-b94d-e6bf2464ba2c",
+        "name": "Fabrikam",
+        "state": "wellFormed"
+      },
+      "defaultBranch": "refs/heads/main",
+      "remoteUrl": "https://ado.corp.local/DefaultCollection/Fabrikam/_git/Fabrikam"
+    },
+    "pullRequestId": 1,
+    "status": "active",
+    "isDraft": false,
+    "createdBy": {
+      "id": "54d125f7-69f7-4191-904f-c5b96b6261c8",
+      "displayName": "Jamal Hartnett",
+      "uniqueName": "fabrikamfiber4@hotmail.com"
+    },
+    "creationDate": "2026-07-09T16:17:04.3025469Z",
+    "title": "my first pull request",
+    "description": " - test2\r\n",
+    "sourceRefName": "refs/heads/mytopic",
+    "targetRefName": "refs/heads/main",
+    "mergeStatus": "succeeded",
+    "mergeId": "a10bb228-6ba6-4362-abd7-49ea21333dbd",
+    "lastMergeSourceCommit": {
+      "commitId": "53d54ac915144006c2c9e90d2c7d3880920db49c"
+    },
+    "lastMergeTargetCommit": {
+      "commitId": "a511f535b1ea495ee0c903badb68fbc83772c882"
+    },
+    "lastMergeCommit": {
+      "commitId": "eef717f69257a6333f221566c1c987dc94cc0d72"
+    },
+    "url": "https://ado.corp.local/DefaultCollection/_apis/git/repositories/4bc14d40-c903-45e2-872e-0462c7748079/pullRequests/1"
+  },
+  "resourceVersion": "1.0",
+  "createdDate": "2026-07-09T16:17:14.7746185Z"
+}

@@ -1,0 +1,57 @@
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "notificationId": 3,
+  "id": "af07be1b-f3ad-44c8-a7f1-c4835f2df06c",
+  "eventType": "ms.vss-code.git-pullrequest-comment-event",
+  "publisherId": "tfs",
+  "message": { "text": "Jamal Hartnett has commented on a pull request" },
+  "resource": {
+    "comment": {
+      "id": 2,
+      "parentCommentId": 1,
+      "author": {
+        "id": "54d125f7-69f7-4191-904f-c5b96b6261c8",
+        "displayName": "Jamal Hartnett",
+        "uniqueName": "fabrikamfiber4@hotmail.com"
+      },
+      "content": "@<11111111-2222-3333-4444-555555555555> 这里为什么有并发风险？",
+      "commentType": "text",
+      "publishedDate": "2026-07-09T16:30:14.7746185Z",
+      "_links": {
+        "threads": {
+          "href": "https://ado.corp.local/DefaultCollection/_apis/git/repositories/4bc14d40-c903-45e2-872e-0462c7748079/pullRequests/1/threads/5"
+        }
+      }
+    },
+    "pullRequest": {
+      "repository": {
+        "id": "4bc14d40-c903-45e2-872e-0462c7748079",
+        "name": "Fabrikam",
+        "project": {
+          "id": "6ce954b1-ce1f-45d1-b94d-e6bf2464ba2c",
+          "name": "Fabrikam",
+          "state": "wellFormed"
+        },
+        "remoteUrl": "https://ado.corp.local/DefaultCollection/Fabrikam/_git/Fabrikam"
+      },
+      "pullRequestId": 1,
+      "status": "active",
+      "isDraft": false,
+      "title": "my first pull request",
+      "description": " - test2\r\n",
+      "sourceRefName": "refs/heads/mytopic",
+      "targetRefName": "refs/heads/main",
+      "lastMergeSourceCommit": {
+        "commitId": "53d54ac915144006c2c9e90d2c7d3880920db49c"
+      },
+      "lastMergeTargetCommit": {
+        "commitId": "a511f535b1ea495ee0c903badb68fbc83772c882"
+      },
+      "lastMergeCommit": {
+        "commitId": "eef717f69257a6333f221566c1c987dc94cc0d72"
+      }
+    }
+  },
+  "resourceVersion": "2.0",
+  "createdDate": "2026-07-09T16:30:14.7746185Z"
+}
