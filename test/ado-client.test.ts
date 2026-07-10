@@ -115,6 +115,38 @@ describe('AdoClient', () => {
     await expect(client(fetchFn).getAuthenticatedUser()).rejects.toThrow('ADO_PAT');
   });
 
+  it('getPrWorkItemRefs + getWorkItems：字段选择与 HTML 转纯文本', async () => {
+    const { calls, fetchFn } = mockFetch([
+      { json: { value: [{ id: '12' }, { id: 'x' }] } },
+      {
+        json: {
+          value: [
+            {
+              id: 12,
+              fields: {
+                'System.WorkItemType': 'Bug',
+                'System.Title': '折扣算错',
+                'System.Description': '<div>第一行<br/>第二行&nbsp;&amp;&lt;end&gt;</div>',
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const c = client(fetchFn);
+    const ids = await c.getPrWorkItemRefs(pr);
+    expect(ids).toEqual([12]); // 非数字 id 被过滤
+    expect(calls[0].url).toContain(`/pullRequests/7/workitems?`);
+
+    const items = await c.getWorkItems(ids);
+    expect(calls[1].url).toContain('/_apis/wit/workitems?ids=12&fields=System.Title');
+    expect(items[0]).toMatchObject({ id: 12, type: 'Bug', title: '折扣算错' });
+    expect(items[0].description).toBe('第一行\n第二行 &<end>');
+
+    expect(await c.getWorkItems([])).toEqual([]); // 空列表不发请求
+    expect(calls).toHaveLength(2);
+  });
+
   it('非 2xx 抛出带状态码的错误', async () => {
     const { fetchFn } = mockFetch([{ status: 403, json: { message: 'denied' } }]);
     await expect(client(fetchFn).getPullRequest(pr)).rejects.toThrow('HTTP 403');

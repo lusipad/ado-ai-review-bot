@@ -4,7 +4,7 @@ import YAML from 'yaml';
 import type { Config, RepoOverrides } from './config';
 import type { Finding, Logger, ReviewOutput, Severity } from './types';
 import { prKey as toPrKey, repoKey as toRepoKey } from './types';
-import { findingFingerprint, truncateUtf8Bytes } from './util';
+import { findingFingerprint, sleep, truncateUtf8Bytes } from './util';
 import { AdoClient } from './ado/client';
 import { parsePrResource, type PrInfo } from './ado/events';
 import { StateDb } from './state/db';
@@ -144,9 +144,9 @@ export class Pipeline {
       kind = 'full';
       reason = '首次 review（无增量基线）';
     }
-    // 防抖窗口后 commit 已被 review 过（例如手动 /review 先跑了）
-    if (kind === 'incremental' && prior?.lastReviewedCommit === pr.sourceCommit) {
-      logger.info({ key }, '跳过：该 commit 已 review 过');
+    // 幂等：该 commit 已 review 过（ADO 重发事件 / 防抖窗口内手动触发过）。手动 /review 不受限
+    if (!manual && prior?.lastReviewedCommit === pr.sourceCommit) {
+      logger.info({ key, kind }, '跳过：该 commit 已 review 过');
       return;
     }
 
@@ -167,6 +167,12 @@ export class Pipeline {
     await this.syncThreadFeedback(pr, key).catch((err) =>
       logger.warn({ key, err: String(err) }, '线程反馈同步失败，跳过'),
     );
+
+    // 关联工作项（需求上下文），失败不阻塞
+    const workItemsText = await this.fetchWorkItemsText(pr).catch((err) => {
+      logger.warn({ key, err: String(err) }, '工作项获取失败，跳过');
+      return '（无）';
+    });
 
     const checkoutCommit = pr.mergeCommit ?? pr.sourceCommit;
     const conflictNote = pr.mergeCommit
@@ -215,9 +221,10 @@ export class Pipeline {
               .join('\n')
           : '（无）',
         repo_map: this.repoMapFor(rKey, conf),
+        work_items: workItemsText,
       });
 
-      const result = await this.codexRun(worktree, prompt);
+      const result = await this.codexRunWithRetry(worktree, prompt);
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
       const output = parseReviewOutput(result.output);
 
@@ -322,6 +329,43 @@ export class Pipeline {
       diffText = truncateUtf8Bytes(raw, MAX_DIFF_BYTES, '\n…（diff 已截断）');
     }
     return { diffText, changedFiles: files, degradedDiff: degraded };
+  }
+
+  /**
+   * codex 瞬时失败（网络/模型 API 抖动）自动重试。超时不重试——再等一个完整
+   * 超时周期大概率仍失败，且会把任务时长翻倍。
+   */
+  private async codexRunWithRetry(
+    worktree: string,
+    prompt: string,
+    opts?: { sandbox?: string },
+  ): Promise<CodexRunResult> {
+    const retries = this.deps.config.codexRetries;
+    let last: CodexRunResult = { ok: false, output: '', error: '未执行' };
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      last = await this.codexRun(worktree, prompt, opts);
+      if (last.ok) return last;
+      if (last.error?.includes('超时')) return last;
+      if (attempt < retries) {
+        this.deps.logger.warn(
+          { attempt: attempt + 1, err: last.error?.slice(0, 200) },
+          'codex 失败，重试',
+        );
+        await sleep(3000);
+      }
+    }
+    return last;
+  }
+
+  /** PR 关联工作项 → 提示词文本（最多 3 个） */
+  private async fetchWorkItemsText(pr: PrInfo): Promise<string> {
+    const ids = (await this.deps.ado.getPrWorkItemRefs(pr)).slice(0, 3);
+    if (ids.length === 0) return '（无）';
+    const items = await this.deps.ado.getWorkItems(ids);
+    if (items.length === 0) return '（无）';
+    return items
+      .map((w) => `#${w.id} [${w.type}] ${w.title}${w.description ? `\n${w.description}` : ''}`)
+      .join('\n---\n');
   }
 
   // ---------- 反馈学习 ----------
@@ -523,7 +567,7 @@ export class Pipeline {
       });
 
       // 修复需要写权限：覆盖为 workspace-write 沙箱
-      const result = await this.codexRun(worktree, prompt, { sandbox: 'workspace-write' });
+      const result = await this.codexRunWithRetry(worktree, prompt, { sandbox: 'workspace-write' });
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
       const summary = result.output.trim();
 
@@ -780,7 +824,7 @@ export class Pipeline {
         repo_map: this.repoMapFor(rKey, this.effectiveRepoConfig(rKey, worktree)),
       });
 
-      const result = await this.codexRun(worktree, prompt);
+      const result = await this.codexRunWithRetry(worktree, prompt);
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
 
       await ado.updateComment(pr, job.threadId, placeholder.id, result.output.trim());

@@ -49,6 +49,8 @@ export interface Config {
   codexTimeoutMs: number;
   codexSandbox: string;
   codexExtraArgs: string[];
+  /** 非超时失败的自动重试次数 */
+  codexRetries: number;
 
   maxInlineComments: number;
   maxChangedFiles: number;
@@ -117,6 +119,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexTimeoutMs: num(env, 'CODEX_TIMEOUT_MS', 15 * 60 * 1000),
     codexSandbox: env.CODEX_SANDBOX ?? 'read-only',
     codexExtraArgs: (env.CODEX_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
+    codexRetries: num(env, 'CODEX_RETRIES', 1),
 
     maxInlineComments: num(env, 'MAX_INLINE_COMMENTS', 10),
     maxChangedFiles: num(env, 'MAX_CHANGED_FILES', 50),

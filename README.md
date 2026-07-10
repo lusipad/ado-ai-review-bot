@@ -20,7 +20,7 @@ Azure DevOps Server 2022 的 AI 代码评审机器人。PR 一建好就自动做
 - **反馈学习**：你把 bot 的意见线程标为 `Won't Fix`（可附一句理由），bot 会记住——之后同仓库不再提同类建议；某仓库 nit 级意见采纳率长期过低时自动折叠 nit，不再打扰；
 - **度量闭环**：`GET /stats` 随时查 review 次数、意见采纳率、误报拦截数（按仓库/时间窗），可选每周一自动推送周报到群，bot 有没有用，数据说话。
 
-**其它特性**：走 Service Hooks 事件推送，不占用 build agent、无轮询；多 PR 并行、同一 PR 串行去重；**仓库知识库**（首次 review 后自动生成架构摘要，注入后续 review/问答，定位更快更准）；review 结果可推送 RocketChat / 企业微信；提示词、review 规则全部可配置。
+**其它特性**：走 Service Hooks 事件推送，不占用 build agent、无轮询；多 PR 并行、同一 PR 串行去重、重复事件按 commit 幂等；**关联工作项注入**（review 会对照 PR 挂的需求/Bug 检查实现是否达标——ADO 生态独有的优势）；**git 历史意识**（agent 会用 `git log`/`blame` 考证历史决策再提意见）；**仓库知识库**（首次 review 后自动生成架构摘要，注入后续 review/问答，定位更快更准）；模型 API 瞬时失败自动重试；review 结果可推送 RocketChat / 企业微信；提示词、review 规则全部可配置。
 
 ## 工作原理
 
@@ -147,6 +147,7 @@ npm start
 | `CODEX_BIN` / `CODEX_SANDBOX` | | `codex` / `read-only` | Codex CLI 路径与沙箱模式 |
 | `CODEX_TIMEOUT_MS` | | `900000` | 单次 review 超时（15 分钟） |
 | `CODEX_EXTRA_ARGS` | | — | 传给 codex 的额外参数（按版本调整） |
+| `CODEX_RETRIES` | | `1` | 非超时失败（API 抖动）自动重试次数 |
 | `MAX_INLINE_COMMENTS` | | `10` | 每轮行内评论上限，超出归并进总评 |
 | `MAX_CHANGED_FILES` | | `50` | 超过则降级为摘要模式，防超时 |
 | `PROMPTS_DIR` | | `./prompts` | 提示词模板目录 |

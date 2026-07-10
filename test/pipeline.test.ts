@@ -73,6 +73,8 @@ interface AdoCall {
 function makeMockAdo(prResource: () => Record<string, unknown>) {
   const calls: AdoCall[] = [];
   const threads = new Map<number, any>();
+  const workItemRefs: Array<{ id: string }> = [];
+  const workItems: Array<{ id: number; fields: Record<string, unknown> }> = [];
   let threadSeq = 100;
   let commentSeq = 1000;
 
@@ -86,6 +88,9 @@ function makeMockAdo(prResource: () => Record<string, unknown>) {
     calls.push({ method, url: u, body });
 
     if (method === 'GET' && /pullRequests\/\d+\?api-version/.test(u)) return json(prResource());
+    if (method === 'GET' && /pullRequests\/\d+\/workitems\?api-version/.test(u))
+      return json({ value: workItemRefs });
+    if (method === 'GET' && /_apis\/wit\/workitems\?ids=/.test(u)) return json({ value: workItems });
     if (method === 'GET' && /\/threads\?api-version/.test(u))
       return json({ value: [...threads.values()] });
     if (method === 'POST' && /\/threads\?api-version/.test(u)) {
@@ -124,7 +129,7 @@ function makeMockAdo(prResource: () => Record<string, unknown>) {
     return json({});
   }) as typeof fetch;
 
-  return { calls, fetchFn, threads };
+  return { calls, fetchFn, threads, workItemRefs, workItems };
 }
 
 // ---------- 组装 ----------
@@ -146,6 +151,7 @@ function makeConfig(dataDir: string): Config {
     codexTimeoutMs: 60_000,
     codexSandbox: 'read-only',
     codexExtraArgs: [],
+    codexRetries: 1,
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
@@ -506,6 +512,55 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     await pipeline.runFullReview(currentPr, '/review 命令', true);
     expect(reviewPrompts[1]).toContain('这是仓库地图内容 ABC123'); // 第二次注入
     expect(mapGenerations).toBe(1); // 未过期，不重复生成
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('瞬时失败自动重试 + 同 commit 幂等跳过 + 工作项注入提示词', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-retry-'));
+    const config = makeConfig(dataDir);
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+    ado.workItemRefs.push({ id: '12' });
+    ado.workItems.push({
+      id: 12,
+      fields: {
+        'System.WorkItemType': 'Bug',
+        'System.Title': '会员折扣算错金额',
+        'System.Description': '<p>九五折被算成了<br>仅减免 0.05%</p>',
+      },
+    });
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    const prompts: string[] = [];
+    let calls = 0;
+    const codexRun = async (_wt: string, prompt: string) => {
+      calls++;
+      if (calls === 1) return { ok: false, output: '', error: 'stream error: connection reset' };
+      prompts.push(prompt);
+      return { ok: true, output: JSON.stringify({ summary: 'ok', findings: [], resolvedThreadIds: [] }) };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    // 第一次：首次调用失败 → 自动重试成功
+    await pipeline.runFullReview(currentPr, 'PR 创建');
+    expect(calls).toBe(2);
+    // 工作项注入（HTML 已转纯文本）
+    expect(prompts[0]).toContain('#12 [Bug] 会员折扣算错金额');
+    expect(prompts[0]).toContain('九五折被算成了\n仅减免 0.05%');
+
+    // 同 commit 的自动触发 → 幂等跳过，codex 不再被调用
+    await pipeline.runFullReview(currentPr, 'PR 创建（重复事件）');
+    expect(calls).toBe(2);
+
+    // 手动 /review 不受幂等限制
+    await pipeline.runFullReview(currentPr, '/review 命令', true);
+    expect(calls).toBe(3);
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

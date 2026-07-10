@@ -80,6 +80,43 @@ export class AdoClient {
     return this.request('GET', `/_apis/git/repositories/${repoId}/pullRequests/${pullRequestId}`);
   }
 
+  /** PR 关联的工作项引用（id 列表） */
+  async getPrWorkItemRefs(pr: PrRef): Promise<number[]> {
+    const res = await this.request<{ value?: Array<{ id: string }> }>(
+      'GET',
+      `${this.prPath(pr)}/workitems`,
+    );
+    return (res.value ?? []).map((w) => Number(w.id)).filter((n) => Number.isInteger(n));
+  }
+
+  /** 批量取工作项的标题/类型/描述/验收标准 */
+  async getWorkItems(
+    ids: number[],
+  ): Promise<Array<{ id: number; type: string; title: string; description: string }>> {
+    if (ids.length === 0) return [];
+    const fields = [
+      'System.Title',
+      'System.WorkItemType',
+      'System.Description',
+      'Microsoft.VSTS.Common.AcceptanceCriteria',
+    ].join(',');
+    const res = await this.request<{
+      value?: Array<{ id: number; fields?: Record<string, unknown> }>;
+    }>('GET', `/_apis/wit/workitems?ids=${ids.join(',')}&fields=${fields}`);
+    return (res.value ?? []).map((w) => {
+      const f = w.fields ?? {};
+      const desc = [f['System.Description'], f['Microsoft.VSTS.Common.AcceptanceCriteria']]
+        .filter((s) => typeof s === 'string' && s)
+        .join('\n验收标准：');
+      return {
+        id: w.id,
+        type: String(f['System.WorkItemType'] ?? ''),
+        title: String(f['System.Title'] ?? ''),
+        description: stripHtml(desc).slice(0, 1000),
+      };
+    });
+  }
+
   /**
    * PAT 所属账号的 identity（用于启动时自动获取 BOT_ACCOUNT_ID）。
    * 实测 ADO Server 2022 的 connectionData 带 api-version 会返回 400，必须裸调。
@@ -151,4 +188,19 @@ export class AdoClient {
   prWebUrl(pr: PrRef): string {
     return `${this.baseUrl}/${encodeURIComponent(pr.project)}/_git/${encodeURIComponent(pr.repoName)}/pullrequest/${pr.pullRequestId}`;
   }
+}
+
+/** 工作项描述是 HTML，转成纯文本注入提示词 */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
