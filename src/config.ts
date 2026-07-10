@@ -22,6 +22,8 @@ export interface RepoOverrides {
   knowledgeBase?: boolean;
   /** 多模型交叉 review 的 codex profile 列表（覆盖全局 REVIEW_PROFILES） */
   profiles?: string[];
+  /** 沟通风格卡（覆盖全局 PERSONA） */
+  persona?: string;
   notify?: Partial<NotifyConfig>;
 }
 
@@ -58,6 +60,8 @@ export interface Config {
    * review 后合并 findings。'default' 表示不带 -p 的默认配置。
    */
   reviewProfiles: string[];
+  /** 沟通风格卡，注入 review/问答/修复的提示词 */
+  persona: string;
   /** 优雅停机时等待在跑任务收尾的最长时间（毫秒） */
   shutdownGraceMs: number;
 
@@ -83,6 +87,12 @@ export interface Config {
   /** ADO 账号（uniqueName 或 displayName）→ RocketChat 用户名，通知 @ 人用；来自 BOT_CONFIG_FILE */
   userMap: Record<string, string>;
 }
+
+/** 默认沟通风格卡：决定 review 评论 / 问答 / 修复说明的语气（可用 PERSONA 或 .ai-review.yml persona 覆盖） */
+export const DEFAULT_PERSONA =
+  '你是一位资深而友善的同事型评审者：指出问题时先说清楚在什么场景下会出什么事（给证据、给复现路径），' +
+  '再给出具体改法；语气直接但不居高临下，不说教、不打官腔、不堆砌客套话；对事不对人，' +
+  '认可作者合理的设计取舍。用自然的中文表达，能一句话说清的不展开长篇。';
 
 function req(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -139,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    persona: env.PERSONA || DEFAULT_PERSONA,
     shutdownGraceMs: num(env, 'SHUTDOWN_GRACE_MS', 2 * 60 * 1000),
 
     maxInlineComments: num(env, 'MAX_INLINE_COMMENTS', 10),

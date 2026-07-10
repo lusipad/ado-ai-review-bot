@@ -157,6 +157,7 @@ function makeConfig(dataDir: string): Config {
     reviewProfiles: ['default'],
     shutdownGraceMs: 1000,
     userMap: {},
+    persona: '测试人格：直接了当，不打官腔。',
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
@@ -289,9 +290,10 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     });
     await pipeline.runFullReview(currentPr, 'PR 创建');
 
-    // 提示词包含 PR 元信息与 diff
+    // 提示词包含 PR 元信息、diff 与沟通风格卡
     expect(codexPrompts[0]).toContain('改造 add 函数');
     expect(codexPrompts[0]).toContain('c = 0');
+    expect(codexPrompts[0]).toContain('测试人格：直接了当');
     // 状态：pending → succeeded
     const statusCalls = ado.calls.filter((c) => c.url.includes('/statuses?'));
     expect(statusCalls.map((c) => c.body.state)).toEqual(['pending', 'succeeded']);

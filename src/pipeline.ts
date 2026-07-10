@@ -45,6 +45,7 @@ interface RepoYamlConfig {
   allowFix?: boolean;
   knowledgeBase?: boolean;
   profiles?: string[];
+  persona?: string;
 }
 
 /** 变更文件扩展名 → prompts/checklists/ 下的专项清单 */
@@ -62,6 +63,7 @@ interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview'
   ignorePaths: string[];
   focus: string;
   profiles: string[];
+  persona: string;
   /** minSeverity 是被采纳率数据自动收紧的（总评里要向用户说明） */
   autoTightened: boolean;
 }
@@ -275,6 +277,7 @@ export class Pipeline {
         repo_map: this.repoMapFor(rKey, conf),
         work_items: workItemsText,
         language_checklists: this.languageChecklists(changedFiles),
+        persona: conf.persona,
       });
 
       const output = await this.runMultiModelReview(worktree, prompt, conf.profiles);
@@ -658,6 +661,7 @@ export class Pipeline {
         anchor,
         instruction: job.instruction || '（无，按线程内容修复）',
         repo_map: this.repoMapFor(rKey, conf),
+        persona: conf.persona,
       });
 
       // 修复需要写权限：覆盖为 workspace-write 沙箱
@@ -940,13 +944,15 @@ export class Pipeline {
         `qa-${pr.pullRequestId}-${Date.now()}`,
       );
 
+      const qaConf = this.effectiveRepoConfig(rKey, worktree);
       const prompt = renderTemplate(loadPrompt(config.promptsDir, 'qa.md'), {
         pr_title: current.title,
         pr_description: current.description || '（无描述）',
         thread_history: history || '（无历史评论）',
         anchor,
         question: job.question,
-        repo_map: this.repoMapFor(rKey, this.effectiveRepoConfig(rKey, worktree)),
+        repo_map: this.repoMapFor(rKey, qaConf),
+        persona: qaConf.persona,
         images_note: imagePaths.length
           ? `（线程中附有 ${imagePaths.length} 张图片，已一并提供给你，请结合图片内容回答）`
           : '',
@@ -1021,6 +1027,7 @@ export class Pipeline {
       allowFix: yamlConf.allowFix ?? override.allowFix ?? config.fixEnabled,
       knowledgeBase: yamlConf.knowledgeBase ?? override.knowledgeBase ?? config.knowledgeEnabled,
       profiles: yamlConf.profiles ?? override.profiles ?? config.reviewProfiles,
+      persona: yamlConf.persona ?? override.persona ?? config.persona,
       autoTightened,
     };
   }
