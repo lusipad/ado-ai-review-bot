@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+release/
 .env
 *.log
 bot-config.json

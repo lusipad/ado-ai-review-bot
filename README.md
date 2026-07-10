@@ -188,6 +188,21 @@ npm test          # vitest：事件路由 / 调度防抖 / codex 输出解析 / 
 npm run build
 ```
 
+## 一键打包（离线部署包）
+
+打包机需要能访问 npm registry；产出的部署包**自包含**（已编译 + 生产依赖），部署机无需联网装依赖：
+
+```bash
+npm run package          # Linux/macOS/WSL → release/ai-review-bot-<版本>-linux-x64.tar.gz
+npm run package:win      # 在 Windows 上运行 → release/ai-review-bot-<版本>-win32-x64.zip
+npm run package:docker   # 额外产出离线 Docker 镜像 release/ai-review-bot-<版本>-docker.tar
+```
+
+- 打包流程 = `npm ci` → 编译 → 跑全部测试 → 组装（dist + 生产 node_modules + prompts + 启动脚本 + 部署说明）→ 归档；测试不过不出包（可加 `--skip-tests` 跳过，不推荐）。
+- ⚠️ tar.gz / zip 含原生模块（better-sqlite3），**只能部署到与打包机相同的 OS/架构**——Windows 部署包必须在 Windows 上打；跨平台用 Docker 镜像包。
+- 部署机上解压后：`cp .env.example .env` 填配置 → `./start.sh`（Windows 用 `start.ps1`），注册系统服务的方法见包内 `DEPLOY.md`。
+- Docker 镜像包在内网机 `docker load -i ai-review-bot-<版本>-docker.tar` 即可用。
+
 ## 故障排查
 
 | 现象 | 排查 |
