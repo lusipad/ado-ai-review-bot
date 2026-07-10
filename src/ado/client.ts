@@ -44,10 +44,12 @@ export class AdoClient {
     method: string,
     urlPath: string,
     body?: unknown,
-    apiVersion = '7.0',
+    apiVersion: string | null = '7.0',
   ): Promise<T> {
     const sep = urlPath.includes('?') ? '&' : '?';
-    const url = `${this.baseUrl}${urlPath}${sep}api-version=${apiVersion}`;
+    const url = apiVersion
+      ? `${this.baseUrl}${urlPath}${sep}api-version=${apiVersion}`
+      : `${this.baseUrl}${urlPath}`;
     const res = await this.fetchFn(url, {
       method,
       headers: {
@@ -73,11 +75,14 @@ export class AdoClient {
     return this.request('GET', this.prPath(pr));
   }
 
-  /** PAT 所属账号的 identity（用于启动时自动获取 BOT_ACCOUNT_ID） */
+  /**
+   * PAT 所属账号的 identity（用于启动时自动获取 BOT_ACCOUNT_ID）。
+   * 实测 ADO Server 2022 的 connectionData 带 api-version 会返回 400，必须裸调。
+   */
   async getAuthenticatedUser(): Promise<{ id: string; displayName?: string }> {
     const data = await this.request<{
       authenticatedUser?: { id?: string; providerDisplayName?: string; customDisplayName?: string };
-    }>('GET', '/_apis/connectionData');
+    }>('GET', '/_apis/connectionData', undefined, null);
     const user = data.authenticatedUser;
     if (!user?.id) throw new Error('connectionData 未返回 authenticatedUser.id，请检查 ADO_PAT');
     return { id: user.id, displayName: user.customDisplayName ?? user.providerDisplayName };

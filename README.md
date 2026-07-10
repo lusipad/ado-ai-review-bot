@@ -114,8 +114,10 @@ npm start
 三个订阅的 Action 页统一填：
 
 - **URL**：`http://<bot地址>:3000/webhook/ado`
-- **Basic authentication password**：填 `WEBHOOK_SECRET` 的值（用户名任意）
+- **HTTP headers**：填 `x-webhook-secret: <WEBHOOK_SECRET 的值>`
 - **Resource details to send**：All
+
+> ⚠️ ADO 规定 **Basic authentication 密码只能配 HTTPS URL**。bot 走 HTTP 部署时必须用上面的 header 方式（两种 bot 都支持）；若 bot 有 HTTPS 反代，也可改用 basic auth 密码。
 
 每个订阅页有 **Test** 按钮，点一下 → bot 日志应出现 `事件已路由`。
 
@@ -244,7 +246,12 @@ npm run package:docker   # 额外产出离线 Docker 镜像 release/ai-review-bo
 
 ### Windows 部署
 
-codex 的 `--sandbox read-only` 在 Windows 原生支持较弱。必须 Windows 部署时，先验证 `codex exec --sandbox read-only "你好"` 可用；不可用则按需调整 `CODEX_SANDBOX`（bot 只给 codex 只读用途，风险可控但建议知情决策）。
+实测注意点（Windows 11 + codex 0.144 验证）：
+
+- **`CODEX_BIN` 必须指向真实 exe**：npm 全局安装的 `codex` 是 `.ps1/.cmd` 包装器，Node 的 `spawn` 无法直接执行。真实路径形如
+  `%APPDATA%\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe`；
+- **沙箱**：codex 0.144+ 已支持 Windows 沙箱；老版本先验证 `codex exec --sandbox read-only "你好"`，不可用再调整 `CODEX_SANDBOX`；
+- **专用 CODEX_HOME**：bot 会继承部署账号的 `~/.codex/config.toml`（包括个人 MCP server、推理档位等）。服务器部署建议在 `.env` 里设 `CODEX_HOME` 指向 bot 专用目录，放一份只含 model provider 的干净 config.toml。
 
 ## 上线验收清单
 
@@ -263,7 +270,8 @@ codex 的 `--sandbox read-only` 在 Windows 原生支持较弱。必须 Windows 
 |---|---|
 | 收不到事件 | ADO Service Hooks 订阅历史（每条通知有请求/响应详情）；防火墙；订阅连续失败会被 ADO 自动禁用（列表显示红色 ⚠），需手动 Enable |
 | webhook 返回 401 | 订阅里的密钥与 `WEBHOOK_SECRET` 不一致 |
-| 启动报 connectionData 错误 | `ADO_PAT` 无效或 `ADO_URL` 不是 collection 一级 |
+| 启动报 connectionData 401 | `ADO_PAT` 无效或 `ADO_URL` 不是 collection 一级；**检查系统环境变量里是否残留旧的 `ADO_PAT`**——`node --env-file` 不覆盖已存在的环境变量，旧值会顶掉 `.env` 里的新值 |
+| 创建订阅报「URL scheme must be HTTPS」 | ADO 不允许 HTTP URL 配 basic auth 密码，改用 `x-webhook-secret` HTTP header（见上文） |
 | review 一直 pending | bot 日志看 codex 是否超时（`CODEX_TIMEOUT_MS`）；手动 `codex exec` 验证模型连通 |
 | 行内评论位置不对 | 确认模型输出行号基于 worktree 实际文件；必要时降低 `maxInlineComments` 观察 |
 | PR 有冲突 | 无预合并 commit，bot 回退到源分支 review 并在总评顶部注明 |

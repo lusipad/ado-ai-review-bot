@@ -101,12 +101,12 @@ describe('AdoClient', () => {
     expect(calls[1].body).toEqual({ content: 'new content' });
   });
 
-  it('getAuthenticatedUser 走 collection 级 connectionData', async () => {
+  it('getAuthenticatedUser 走 collection 级 connectionData（不带 api-version，Server 2022 带了会 400）', async () => {
     const { calls, fetchFn } = mockFetch([
       { json: { authenticatedUser: { id: 'guid-1', providerDisplayName: 'ai-review-bot' } } },
     ]);
     const user = await client(fetchFn).getAuthenticatedUser();
-    expect(calls[0].url).toBe(`${BASE}/_apis/connectionData?api-version=7.0`);
+    expect(calls[0].url).toBe(`${BASE}/_apis/connectionData`);
     expect(user).toEqual({ id: 'guid-1', displayName: 'ai-review-bot' });
   });
 
