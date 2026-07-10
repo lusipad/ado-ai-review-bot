@@ -163,6 +163,15 @@ export function createApp(config: Config): { app: FastifyInstance; deps: AppDeps
 async function main(): Promise<void> {
   const config = loadConfig();
   const { app, deps } = createApp(config);
+  // BOT_ACCOUNT_ID 未配置时自动获取：PAT 属于 bot 服务账号，connectionData 返回的就是它的 identity
+  if (!config.botAccountId) {
+    const user = await deps.ado.getAuthenticatedUser();
+    config.botAccountId = user.id;
+    app.log.info(
+      { botAccountId: user.id, displayName: user.displayName },
+      '已自动获取 bot 账号 identity（如需固定可写入 BOT_ACCOUNT_ID）',
+    );
+  }
   await deps.workspace.cleanupOrphans();
   await app.listen({ host: config.host, port: config.port });
   app.log.info(

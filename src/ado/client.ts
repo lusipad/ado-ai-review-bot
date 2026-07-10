@@ -73,6 +73,16 @@ export class AdoClient {
     return this.request('GET', this.prPath(pr));
   }
 
+  /** PAT 所属账号的 identity（用于启动时自动获取 BOT_ACCOUNT_ID） */
+  async getAuthenticatedUser(): Promise<{ id: string; displayName?: string }> {
+    const data = await this.request<{
+      authenticatedUser?: { id?: string; providerDisplayName?: string; customDisplayName?: string };
+    }>('GET', '/_apis/connectionData');
+    const user = data.authenticatedUser;
+    if (!user?.id) throw new Error('connectionData 未返回 authenticatedUser.id，请检查 ADO_PAT');
+    return { id: user.id, displayName: user.customDisplayName ?? user.providerDisplayName };
+  }
+
   getThreads(pr: PrRef): Promise<{ value: CommentThread[] }> {
     return this.request('GET', `${this.prPath(pr)}/threads`);
   }

@@ -101,6 +101,20 @@ describe('AdoClient', () => {
     expect(calls[1].body).toEqual({ content: 'new content' });
   });
 
+  it('getAuthenticatedUser 走 collection 级 connectionData', async () => {
+    const { calls, fetchFn } = mockFetch([
+      { json: { authenticatedUser: { id: 'guid-1', providerDisplayName: 'ai-review-bot' } } },
+    ]);
+    const user = await client(fetchFn).getAuthenticatedUser();
+    expect(calls[0].url).toBe(`${BASE}/_apis/connectionData?api-version=7.0`);
+    expect(user).toEqual({ id: 'guid-1', displayName: 'ai-review-bot' });
+  });
+
+  it('getAuthenticatedUser 缺少 id 时报错提示检查 PAT', async () => {
+    const { fetchFn } = mockFetch([{ json: {} }]);
+    await expect(client(fetchFn).getAuthenticatedUser()).rejects.toThrow('ADO_PAT');
+  });
+
   it('非 2xx 抛出带状态码的错误', async () => {
     const { fetchFn } = mockFetch([{ status: 403, json: { message: 'denied' } }]);
     await expect(client(fetchFn).getPullRequest(pr)).rejects.toThrow('HTTP 403');

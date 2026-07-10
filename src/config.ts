@@ -30,7 +30,7 @@ export interface Config {
   /** Service Hook 订阅里配置的密钥（basic auth 密码或 x-webhook-secret 头） */
   webhookSecret: string;
 
-  /** bot 服务账号的 identity GUID（过滤自触发 + mention 匹配） */
+  /** bot 服务账号的 identity GUID（过滤自触发 + mention 匹配）；留空则启动时经 connectionData 自动获取 */
   botAccountId: string;
   /** bot 显示名（纯文本 @ 匹配），如 ai-review-bot */
   botDisplayName: string;
@@ -91,7 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adoPat: req(env, 'ADO_PAT'),
     webhookSecret: req(env, 'WEBHOOK_SECRET'),
 
-    botAccountId: req(env, 'BOT_ACCOUNT_ID'),
+    botAccountId: env.BOT_ACCOUNT_ID ?? '',
     botDisplayName: env.BOT_DISPLAY_NAME ?? 'ai-review-bot',
 
     debounceMs: num(env, 'DEBOUNCE_MS', 3 * 60 * 1000),

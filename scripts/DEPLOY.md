@@ -15,7 +15,7 @@
 ## 启动
 
 ```bash
-cp .env.example .env      # 填写 ADO_URL / ADO_PAT / WEBHOOK_SECRET / BOT_ACCOUNT_ID / INTRANET_API_KEY
+cp .env.example .env      # 4 个必填：ADO_URL / ADO_PAT / WEBHOOK_SECRET / INTRANET_API_KEY
 ./start.sh                # Windows: powershell -ExecutionPolicy Bypass -File start.ps1
 curl http://localhost:3000/healthz   # {"ok":true} 即成功
 ```
