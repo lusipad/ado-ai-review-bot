@@ -111,6 +111,8 @@ function makeMockAdo(prResource: () => Record<string, unknown>) {
       t?.comments?.push({ id, content: body.content });
       return json({ id });
     }
+    if (method === 'GET' && /\/attachments\//.test(u))
+      return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
     const threadGet = u.match(/\/threads\/(\d+)\?api-version/);
     if (method === 'GET' && threadGet) {
       const t = threads.get(Number(threadGet[1]));
@@ -602,6 +604,52 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     // 手动 /review 不受幂等限制
     await pipeline.runFullReview(currentPr, '/review 命令', true);
     expect(calls).toBe(3);
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('QA 带图：线程截图下载后经 -i 传给 codex，用完清理', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-img-'));
+    const config = makeConfig(dataDir);
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+    // 线程里有一条带截图的评论
+    ado.threads.set(66, {
+      id: 66,
+      status: 'active',
+      threadContext: { filePath: '/app.ts', rightFileStart: { line: 1 }, rightFileEnd: { line: 1 } },
+      comments: [
+        {
+          id: 1,
+          content: '报错截图 ![err](https://ado.corp.local/DefaultCollection/Proj/_apis/git/repositories/g/pullRequests/1/attachments/err.png) 这是怎么回事？',
+          author: { id: 'user-1', displayName: '开发者' },
+        },
+      ],
+    });
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    let seenImages: string[] = [];
+    const codexRun = async (_wt: string, prompt: string, opts?: { images?: string[] }) => {
+      seenImages = opts?.images ?? [];
+      expect(prompt).toContain('附有 1 张图片');
+      // 图片文件此刻真实存在且是下载的内容
+      expect(fs.existsSync(seenImages[0])).toBe(true);
+      expect([...fs.readFileSync(seenImages[0])].slice(0, 4)).toEqual([137, 80, 78, 71]);
+      return { ok: true, output: '图里是空指针异常，原因是……' };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    await pipeline.runQa({ pr: currentPr, threadId: 66, commentId: 1, question: '这是怎么回事？' });
+
+    expect(seenImages).toHaveLength(1);
+    expect(fs.existsSync(seenImages[0])).toBe(false); // 用完已清理
+    const patch = ado.calls.find((c) => c.method === 'PATCH' && /\/threads\/66\/comments\/\d+\?/.test(c.url));
+    expect(patch?.body.content).toContain('空指针异常');
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

@@ -1,10 +1,11 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import type { Config, RepoOverrides } from './config';
 import type { Finding, Logger, ReviewOutput, Severity } from './types';
 import { prKey as toPrKey, repoKey as toRepoKey } from './types';
-import { findingFingerprint, sleep, truncateUtf8Bytes } from './util';
+import { extractImageUrls, findingFingerprint, sleep, truncateUtf8Bytes } from './util';
 import { AdoClient } from './ado/client';
 import { parsePrResource, type PrInfo } from './ado/events';
 import { StateDb } from './state/db';
@@ -82,7 +83,7 @@ export interface FixJob {
 export type CodexRunner = (
   worktree: string,
   prompt: string,
-  opts?: { sandbox?: string; profile?: string },
+  opts?: { sandbox?: string; profile?: string; images?: string[] },
 ) => Promise<CodexRunResult>;
 
 export interface PipelineDeps {
@@ -147,6 +148,7 @@ export class Pipeline {
             timeoutMs: deps.config.codexTimeoutMs,
             extraArgs: deps.config.codexExtraArgs,
             profile: opts?.profile,
+            images: opts?.images,
             logger: deps.logger,
           },
           worktree,
@@ -387,7 +389,7 @@ export class Pipeline {
   private async codexRunWithRetry(
     worktree: string,
     prompt: string,
-    opts?: { sandbox?: string; profile?: string },
+    opts?: { sandbox?: string; profile?: string; images?: string[] },
   ): Promise<CodexRunResult> {
     const retries = this.deps.config.codexRetries;
     let last: CodexRunResult = { ok: false, output: '', error: '未执行' };
@@ -899,15 +901,32 @@ export class Pipeline {
     // 先占位，用户立刻看到 bot 已响应
     const placeholder = await ado.replyToThread(pr, job.threadId, '🔍 正在分析，请稍候…');
     let worktree: string | undefined;
+    const imagePaths: string[] = [];
     try {
       const fresh = await ado.getPullRequest(pr);
       const current = parsePrResource(fresh, config.adoUrl);
       const thread = await ado.getThread(pr, job.threadId);
 
-      const history = (thread.comments ?? [])
-        .filter((c) => !c.isDeleted && c.id !== placeholder.id && c.content)
+      const threadComments = (thread.comments ?? []).filter(
+        (c) => !c.isDeleted && c.id !== placeholder.id && c.content,
+      );
+      const history = threadComments
         .map((c) => `${c.author?.displayName ?? '未知'}：${c.content}`)
         .join('\n---\n');
+
+      // 线程里的截图附件 → 下载后随提示词传给模型（需模型支持视觉；失败降级为纯文本）
+      const imageUrls = [...new Set(threadComments.flatMap((c) => extractImageUrls(c.content!)))].slice(0, 4);
+      for (const u of imageUrls) {
+        try {
+          const buf = await ado.downloadAttachment(u);
+          const ext = path.extname(new URL(u, config.adoUrl + '/').pathname) || '.png';
+          const file = path.join(os.tmpdir(), `ado-qa-img-${Date.now()}-${imagePaths.length}${ext}`);
+          fs.writeFileSync(file, buf);
+          imagePaths.push(file);
+        } catch (err) {
+          logger.warn({ url: u.slice(0, 120), err: String(err) }, '附件图片下载失败，跳过');
+        }
+      }
       const anchor = thread.threadContext?.filePath
         ? `${thread.threadContext.filePath.replace(/^\//, '')} 第 ${thread.threadContext.rightFileStart?.line ?? '?'} 行`
         : '（该线程未锚定具体代码位置）';
@@ -928,9 +947,12 @@ export class Pipeline {
         anchor,
         question: job.question,
         repo_map: this.repoMapFor(rKey, this.effectiveRepoConfig(rKey, worktree)),
+        images_note: imagePaths.length
+          ? `（线程中附有 ${imagePaths.length} 张图片，已一并提供给你，请结合图片内容回答）`
+          : '',
       });
 
-      const result = await this.codexRunWithRetry(worktree, prompt);
+      const result = await this.codexRunWithRetry(worktree, prompt, { images: imagePaths });
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
 
       await ado.updateComment(pr, job.threadId, placeholder.id, result.output.trim());
@@ -949,6 +971,7 @@ export class Pipeline {
         )
         .catch(() => undefined);
     } finally {
+      for (const f of imagePaths) fs.rmSync(f, { force: true });
       if (worktree) await workspace.removeWorktree(rKey, worktree);
     }
   }

@@ -147,6 +147,27 @@ describe('AdoClient', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('downloadAttachment：带 PAT 下载、相对路径解析、拒绝外部主机', async () => {
+    const calls: Captured[] = [];
+    const fetchFn = (async (url: any, init: any) => {
+      calls.push({ url: String(url), method: 'GET', headers: init?.headers ?? {} });
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    }) as typeof fetch;
+    const c = client(fetchFn);
+
+    const buf = await c.downloadAttachment(`${BASE}/Proj/_apis/git/repositories/g/pullRequests/1/attachments/err.png`);
+    expect([...buf]).toEqual([1, 2, 3]);
+    expect(calls[0].headers.authorization).toContain('Basic');
+
+    // 相对路径 → 解析到 ADO 主机
+    await c.downloadAttachment('/DefaultCollection/p/_apis/git/repositories/g/pullRequests/1/attachments/a.png');
+    expect(calls[1].url).toContain('ado.corp.local');
+
+    // 外部主机 → 拒绝（PAT 不能外泄）
+    await expect(c.downloadAttachment('https://evil.example.com/steal.png')).rejects.toThrow('非 ADO 主机');
+    expect(calls).toHaveLength(2);
+  });
+
   it('非 2xx 抛出带状态码的错误', async () => {
     const { fetchFn } = mockFetch([{ status: 403, json: { message: 'denied' } }]);
     await expect(client(fetchFn).getPullRequest(pr)).rejects.toThrow('HTTP 403');

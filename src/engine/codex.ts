@@ -11,6 +11,8 @@ export interface CodexOptions {
   extraArgs: string[];
   /** codex config.toml 里的 profile 名；'default' 或空 = 不传 -p（用默认配置） */
   profile?: string;
+  /** 附加图片文件路径（codex -i，需模型支持视觉） */
+  images?: string[];
   logger: Logger;
 }
 
@@ -43,6 +45,7 @@ export async function runCodex(
     '--output-last-message',
     outFile,
     ...(opts.profile && opts.profile !== 'default' ? ['-p', opts.profile] : []),
+    ...(opts.images ?? []).flatMap((img) => ['-i', img]),
     ...opts.extraArgs,
     '-', // 从 stdin 读提示词
   ];

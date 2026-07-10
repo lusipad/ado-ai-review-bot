@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { StateDb } from '../src/state/db';
-import { findingFingerprint, msUntilNextWeekly } from '../src/util';
+import { extractImageUrls, findingFingerprint, msUntilNextWeekly } from '../src/util';
 
 let tmpDir: string;
 
@@ -194,6 +194,26 @@ describe('msUntilNextWeekly', () => {
     // 恰好周三 09:00 → 一整周
     const wed9 = new Date(2026, 6, 8, 9, 0, 0);
     expect(msUntilNextWeekly(wed9, 3, 9)).toBe(7 * 24 * 3600_000);
+  });
+});
+
+describe('extractImageUrls', () => {
+  it('提取 markdown 图片，识别扩展名或 attachments 路径，尊重上限', () => {
+    const md = [
+      '看这个报错 ![err](http://ado/x/_apis/git/repositories/g/pullRequests/1/attachments/err.png)',
+      '还有 ![截图](/DefaultCollection/p/_apis/git/repositories/g/pullRequests/1/attachments/shot)',
+      '普通链接 [doc](http://ado/doc.pdf) 不算',
+      '![a](http://x/1.jpg) ![b](http://x/2.jpeg) ![c](http://x/3.webp)',
+    ].join('\n');
+    const urls = extractImageUrls(md, 4);
+    expect(urls).toHaveLength(4);
+    expect(urls[0]).toContain('err.png');
+    expect(urls[1]).toContain('/attachments/shot');
+    expect(urls.some((u) => u.includes('doc.pdf'))).toBe(false);
+  });
+
+  it('无图片返回空数组', () => {
+    expect(extractImageUrls('纯文本 [链接](http://x/a.html)')).toEqual([]);
   });
 });
 

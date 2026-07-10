@@ -184,6 +184,20 @@ export class AdoClient {
     });
   }
 
+  /** 下载 ADO 附件（评论里的截图等）。只允许本 ADO 主机，防止把 PAT 发给外部地址 */
+  async downloadAttachment(url: string): Promise<Buffer> {
+    const target = new URL(url, this.baseUrl + '/');
+    const base = new URL(this.baseUrl);
+    if (target.host !== base.host) {
+      throw new Error(`拒绝下载非 ADO 主机的附件: ${target.host}`);
+    }
+    const res = await this.fetchFn(target.toString(), {
+      headers: { authorization: this.authHeader },
+    });
+    if (!res.ok) throw new Error(`附件下载失败: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   /** PR 页面地址（通知消息里用） */
   prWebUrl(pr: PrRef): string {
     return `${this.baseUrl}/${encodeURIComponent(pr.project)}/_git/${encodeURIComponent(pr.repoName)}/pullrequest/${pr.pullRequestId}`;

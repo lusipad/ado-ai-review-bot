@@ -60,6 +60,20 @@ export function msUntilNextWeekly(now: Date, weekday: number, hour: number): num
   return next.getTime() - now.getTime();
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|bmp|webp)(\?|$)/i;
+
+/** 从 markdown 中提取图片 URL（![alt](url)），最多 max 个 */
+export function extractImageUrls(markdown: string, max = 4): string[] {
+  const urls: string[] = [];
+  for (const m of markdown.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+    const u = m[1];
+    // ADO 附件 URL 可能不带扩展名，路径里有 attachments 也算
+    if (IMAGE_EXT.test(u) || /attachments/i.test(u)) urls.push(u);
+    if (urls.length >= max) break;
+  }
+  return urls;
+}
+
 /** 按 UTF-8 字节数截断（企业微信 markdown 4096 字节上限用） */
 export function truncateUtf8Bytes(text: string, maxBytes: number, suffix = '…'): string {
   const buf = Buffer.from(text, 'utf8');
