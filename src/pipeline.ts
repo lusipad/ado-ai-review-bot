@@ -10,7 +10,12 @@ import { parsePrResource, type PrInfo } from './ado/events';
 import { StateDb } from './state/db';
 import { Workspace } from './repo/workspace';
 import { loadPrompt, renderTemplate } from './engine/prompts';
-import { runCodex, parseReviewOutput, type CodexRunResult } from './engine/codex';
+import {
+  runCodex,
+  parseReviewOutput,
+  parseChallengeVerdicts,
+  type CodexRunResult,
+} from './engine/codex';
 import { NotifyDispatcher } from './notify';
 
 const SEVERITY_RANK: Record<Severity, number> = { 'must-fix': 0, suggestion: 1, nit: 2 };
@@ -21,6 +26,11 @@ const SEVERITY_LABEL: Record<Severity, string> = {
 };
 /** diff 塞进提示词的字节上限，超出截断（agent 会在 worktree 里自己看） */
 const MAX_DIFF_BYTES = 300_000;
+/** 注入提示词的历史被拒意见条数上限 */
+const MAX_REJECTED_FEEDBACK = 15;
+/** 自动收紧：nit 级 finding 已裁决数达到该值且采纳率低于阈值 → 该仓库不再上报 nit */
+const TIGHTEN_MIN_RESOLVED = 8;
+const TIGHTEN_ACCEPT_RATE = 0.25;
 
 /** 仓库内 .ai-review.yml 支持的字段 */
 interface RepoYamlConfig {
@@ -29,11 +39,14 @@ interface RepoYamlConfig {
   minSeverity?: Severity;
   ignorePaths?: string[];
   focus?: string;
+  challenge?: boolean;
 }
 
-interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity'>> {
+interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge'>> {
   ignorePaths: string[];
   focus: string;
+  /** minSeverity 是被采纳率数据自动收紧的（总评里要向用户说明） */
+  autoTightened: boolean;
 }
 
 export interface QaJob {
@@ -129,9 +142,15 @@ export class Pipeline {
     }
 
     logger.info({ key, kind, reason }, '开始 review');
+    const startedAt = Date.now();
     await ado
       .setPrStatus(pr, { state: 'pending', description: `AI review 进行中（${reason}）` })
       .catch((err) => logger.warn({ err: String(err) }, '设置 PR status 失败'));
+
+    // 反馈学习：先同步人工对 bot 历史 finding 线程的处置（wontFix/fixed），失败不阻塞 review
+    await this.syncThreadFeedback(pr, key).catch((err) =>
+      logger.warn({ key, err: String(err) }, '线程反馈同步失败，跳过'),
+    );
 
     const checkoutCommit = pr.mergeCommit ?? pr.sourceCommit;
     const conflictNote = pr.mergeCommit
@@ -155,6 +174,7 @@ export class Pipeline {
       const { diffText, changedFiles, degradedDiff } = await this.collectDiff(pr, rKey, kind, prior?.lastReviewedCommit, conf);
 
       const openFindings = db.listOpenFindings(key);
+      const rejected = db.listRejectedFindings(rKey, MAX_REJECTED_FEEDBACK);
       const template = loadPrompt(config.promptsDir, kind === 'full' ? 'review-full.md' : 'review-incremental.md');
       const prompt = renderTemplate(template, {
         pr_title: pr.title,
@@ -173,13 +193,25 @@ export class Pipeline {
               .map((f) => `- [threadId=${f.threadId}] ${f.file}:${f.line} ${f.title}`)
               .join('\n')
           : '（无）',
+        rejected_feedback: rejected.length
+          ? rejected
+              .map((f) => `- ${f.file}: ${f.title}${f.note ? `（团队理由：${f.note}）` : ''}`)
+              .join('\n')
+          : '（无）',
       });
 
       const result = await this.codexRun(worktree, prompt);
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
       const output = parseReviewOutput(result.output);
 
-      await this.publishReview(pr, key, rKey, kind, output, conf, openFindings);
+      // 质疑 pass：独立复核 findings，丢弃被证伪的（fail-open：复核失败保留全部）
+      const findingsTotal = output.findings.length;
+      let droppedByChallenge = 0;
+      if (conf.challenge && !output.degraded && output.findings.length > 0) {
+        droppedByChallenge = await this.runChallengePass(worktree, output);
+      }
+
+      const posted = await this.publishReview(pr, key, rKey, kind, output, conf, openFindings, droppedByChallenge);
 
       db.upsertPrState(key, {
         isDraft: false,
@@ -191,10 +223,39 @@ export class Pipeline {
         .setPrStatus(pr, { state: 'succeeded', description: this.statusDescription(output) })
         .catch((err) => logger.warn({ err: String(err) }, '设置 PR status 失败'));
 
+      db.insertReviewRun({
+        prKey: key,
+        repoKey: rKey,
+        kind,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        findingsTotal,
+        findingsPosted: posted,
+        mustFix: output.findings.filter((f) => f.severity === 'must-fix').length,
+        droppedByChallenge,
+        degraded: output.degraded,
+      });
+
       this.notifyReviewDone(pr, rKey, output);
-      logger.info({ key, findings: output.findings.length, degraded: output.degraded }, 'review 完成');
+      logger.info(
+        { key, findings: output.findings.length, droppedByChallenge, degraded: output.degraded },
+        'review 完成',
+      );
     } catch (err) {
       logger.error({ key, err: String(err) }, 'review 失败');
+      db.insertReviewRun({
+        prKey: key,
+        repoKey: rKey,
+        kind,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0,
+        findingsPosted: 0,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+        error: String(err).slice(0, 500),
+      });
       await ado
         .setPrStatus(pr, { state: 'failed', description: 'AI review 执行失败，可评论 /review 重试' })
         .catch(() => undefined);
@@ -239,8 +300,105 @@ export class Pipeline {
     return { diffText, changedFiles: files, degradedDiff: degraded };
   }
 
+  // ---------- 反馈学习 ----------
+
+  /**
+   * 把人工对 bot finding 线程的处置同步进状态库：
+   * wontFix/byDesign → 拒绝（连同人工回复的理由，注入后续 review 提示词）；
+   * fixed/closed → 采纳。只处理 open 状态的 finding。
+   */
+  private async syncThreadFeedback(pr: PrInfo, key: string): Promise<void> {
+    const { ado, db, config, logger } = this.deps;
+    const open = db.listOpenFindings(key);
+    if (open.length === 0) return;
+
+    const threads = (await ado.getThreads(pr)).value ?? [];
+    const byId = new Map(threads.map((t) => [t.id, t]));
+    for (const f of open) {
+      const thread = byId.get(f.threadId);
+      const status = thread?.status?.toLowerCase();
+      if (!status || status === 'active' || status === 'pending' || status === 'unknown') continue;
+
+      if (status === 'wontfix' || status === 'bydesign') {
+        // 拒绝理由 = 线程里最后一条非 bot 评论
+        const lastHuman = [...(thread!.comments ?? [])]
+          .reverse()
+          .find(
+            (c) =>
+              !c.isDeleted &&
+              c.content &&
+              c.author?.id?.toLowerCase() !== config.botAccountId.toLowerCase(),
+          );
+        db.updateFindingFeedback(key, f.threadId, 'wontfix', lastHuman?.content?.slice(0, 300));
+        logger.info({ key, threadId: f.threadId, title: f.title }, 'finding 被团队拒绝，已记入反馈');
+      } else if (status === 'fixed' || status === 'closed') {
+        db.updateFindingFeedback(key, f.threadId, status === 'fixed' ? 'fixed' : 'closed');
+      }
+    }
+  }
+
+  // ---------- 质疑 pass ----------
+
+  /**
+   * 用独立提示词（立场：证伪）复核 findings：wrong → 丢弃；confirmed/uncertain → 标注。
+   * 复核本身失败时保留全部 findings（fail-open）。返回丢弃条数。
+   */
+  private async runChallengePass(worktree: string, output: ReviewOutput): Promise<number> {
+    const { config, logger } = this.deps;
+    try {
+      const findingsJson = JSON.stringify(
+        output.findings.map((f, index) => ({
+          index,
+          file: f.file,
+          line: f.line,
+          severity: f.severity,
+          title: f.title,
+          detail: f.detail,
+        })),
+        null,
+        2,
+      );
+      const prompt = renderTemplate(loadPrompt(config.promptsDir, 'challenge.md'), {
+        findings_json: findingsJson,
+      });
+      const result = await this.codexRun(worktree, prompt);
+      if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
+      const verdicts = parseChallengeVerdicts(result.output);
+      if (!verdicts) throw new Error('质疑 pass 输出无法解析');
+
+      const byIndex = new Map(verdicts.map((v) => [v.index, v]));
+      const kept: typeof output.findings = [];
+      let dropped = 0;
+      for (let i = 0; i < output.findings.length; i++) {
+        const f = output.findings[i];
+        const v = byIndex.get(i);
+        if (v?.verdict === 'wrong') {
+          dropped++;
+          logger.info(
+            { file: f.file, title: f.title, reason: v.reason },
+            '质疑 pass 判定为误报，丢弃',
+          );
+          continue;
+        }
+        if (v?.verdict === 'confirmed') {
+          f.verification = 'confirmed';
+          f.verificationNote = v.reason;
+        } else if (v) {
+          f.verification = 'uncertain';
+        }
+        kept.push(f);
+      }
+      output.findings = kept;
+      return dropped;
+    } catch (err) {
+      logger.warn({ err: String(err) }, '质疑 pass 失败，保留全部 findings');
+      return 0;
+    }
+  }
+
   // ---------- 结果发布 ----------
 
+  /** 返回实际发布的 finding 数（行内 + 归并进总评的） */
   private async publishReview(
     pr: PrInfo,
     key: string,
@@ -249,7 +407,8 @@ export class Pipeline {
     output: ReviewOutput,
     conf: EffectiveRepoConfig,
     openFindings: ReturnType<StateDb['listOpenFindings']>,
-  ): Promise<void> {
+    droppedByChallenge: number,
+  ): Promise<number> {
     const { ado, db, logger } = this.deps;
 
     // 1) 过滤 + 排序 + 指纹去重
@@ -276,6 +435,7 @@ export class Pipeline {
         });
         db.insertFinding({
           prKey: key,
+          repoKey: rKey,
           fingerprint: findingFingerprint(f.file, f.title),
           threadId: thread.id,
           severity: f.severity,
@@ -306,7 +466,10 @@ export class Pipeline {
     }
 
     // 4) 总评（编辑同一条，不新发）
-    const summaryContent = this.formatSummaryComment(pr, kind, output, inline.length, overflow);
+    const summaryContent = this.formatSummaryComment(pr, kind, output, inline.length, overflow, {
+      droppedByChallenge,
+      autoTightened: conf.autoTightened,
+    });
     const state = db.getPrState(key);
     let updated = false;
     if (state?.summaryThreadId) {
@@ -321,10 +484,17 @@ export class Pipeline {
       });
       db.upsertPrState(key, { summaryThreadId: thread.id });
     }
+    return eligible.length;
   }
 
   private formatFindingComment(f: Finding): string {
-    return `**${SEVERITY_LABEL[f.severity]}** ${f.title}\n\n${f.detail}`;
+    const parts = [`**${SEVERITY_LABEL[f.severity]}** ${f.title}`, f.detail];
+    if (f.verification === 'confirmed') {
+      parts.push(`> ✅ 已二次复核${f.verificationNote ? `：${f.verificationNote}` : ''}`);
+    } else if (f.verification === 'uncertain') {
+      parts.push('> ⚪ 推断性发现：复核未能在代码中完全证实，请人工判断。');
+    }
+    return parts.join('\n\n');
   }
 
   private formatSummaryComment(
@@ -333,6 +503,7 @@ export class Pipeline {
     output: ReviewOutput,
     inlineCount: number,
     overflow: Finding[],
+    meta: { droppedByChallenge: number; autoTightened: boolean },
   ): string {
     const parts: string[] = ['## 🤖 AI Code Review'];
     if (output.degraded) parts.push('> ⚠️ 结果解析降级：以下为模型原始输出。');
@@ -342,6 +513,10 @@ export class Pipeline {
     if (output.walkthrough) parts.push('### 变更导览', output.walkthrough);
     if (output.riskLevel) parts.push(`**整体风险**：${output.riskLevel}`);
     if (inlineCount > 0) parts.push(`已就 ${inlineCount} 个问题添加行内评论。`);
+    if (meta.droppedByChallenge > 0)
+      parts.push(`_二次复核丢弃了 ${meta.droppedByChallenge} 条疑似误报。_`);
+    if (meta.autoTightened)
+      parts.push('_根据本仓库的历史采纳率，细节级（nit）意见已自动折叠，不再上报。_');
     if (overflow.length > 0) {
       parts.push(
         '### 其他发现',
@@ -391,9 +566,24 @@ export class Pipeline {
   // ---------- @bot 问答 ----------
 
   async runQa(job: QaJob): Promise<void> {
-    const { config, ado, workspace, logger } = this.deps;
+    const { config, db, ado, workspace, logger } = this.deps;
     const pr = job.pr;
     const rKey = toRepoKey(pr);
+    const startedAt = Date.now();
+    const recordRun = (ok: boolean, error?: string) =>
+      db.insertReviewRun({
+        prKey: toPrKey(pr),
+        repoKey: rKey,
+        kind: 'qa',
+        ok,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0,
+        findingsPosted: 0,
+        mustFix: 0,
+        droppedByChallenge: 0,
+        degraded: false,
+        error,
+      });
 
     // 先占位，用户立刻看到 bot 已响应
     const placeholder = await ado.replyToThread(pr, job.threadId, '🔍 正在分析，请稍候…');
@@ -432,8 +622,10 @@ export class Pipeline {
       if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
 
       await ado.updateComment(pr, job.threadId, placeholder.id, result.output.trim());
+      recordRun(true);
       logger.info({ pr: toPrKey(pr), threadId: job.threadId }, '问答完成');
     } catch (err) {
+      recordRun(false, String(err).slice(0, 500));
       logger.error({ pr: toPrKey(pr), threadId: job.threadId, err: String(err) }, '问答失败');
       // 失败也要编辑占位评论，绝不沉默
       await ado
@@ -466,13 +658,32 @@ export class Pipeline {
         }
       }
     }
+
+    // 反馈学习自动收紧：仅当 minSeverity 未被显式配置时生效
+    let minSeverity = yamlConf.minSeverity ?? override.minSeverity;
+    let autoTightened = false;
+    if (!minSeverity) {
+      minSeverity = 'nit';
+      const { resolved, accepted } = this.deps.db.severityAcceptance(rKey, 'nit');
+      if (resolved >= TIGHTEN_MIN_RESOLVED && accepted / resolved < TIGHTEN_ACCEPT_RATE) {
+        minSeverity = 'suggestion';
+        autoTightened = true;
+        this.deps.logger.info(
+          { rKey, resolved, accepted },
+          'nit 级意见采纳率过低，本仓库自动收紧为 suggestion 及以上',
+        );
+      }
+    }
+
     return {
       autoReview: yamlConf.autoReview ?? override.autoReview ?? true,
       maxInlineComments:
         yamlConf.maxInlineComments ?? override.maxInlineComments ?? config.maxInlineComments,
-      minSeverity: yamlConf.minSeverity ?? override.minSeverity ?? 'nit',
+      minSeverity,
       ignorePaths: yamlConf.ignorePaths ?? override.ignorePaths ?? [],
       focus: yamlConf.focus ?? override.focus ?? '',
+      challenge: yamlConf.challenge ?? override.challenge ?? config.challengeEnabled,
+      autoTightened,
     };
   }
 

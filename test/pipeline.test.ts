@@ -86,6 +86,8 @@ function makeMockAdo(prResource: () => Record<string, unknown>) {
     calls.push({ method, url: u, body });
 
     if (method === 'GET' && /pullRequests\/\d+\?api-version/.test(u)) return json(prResource());
+    if (method === 'GET' && /\/threads\?api-version/.test(u))
+      return json({ value: [...threads.values()] });
     if (method === 'POST' && /\/threads\?api-version/.test(u)) {
       const id = ++threadSeq;
       const thread = {
@@ -147,6 +149,9 @@ function makeConfig(dataDir: string): Config {
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
+    // 端到端主链路测试关闭质疑 pass（否则每次 review 多一次 codex 调用），专门的测试单独开
+    challengeEnabled: false,
+    weeklyReportEnabled: false,
     notify: { rocketchatWebhookUrl: 'https://chat.local/hooks/x', events: ['review_completed', 'must_fix_found', 'job_failed'] },
     repoOverrides: {},
   };
@@ -315,6 +320,93 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     // QA 提示词带线程历史与锚定位置
     expect(codexPrompts[2]).toContain('这里为什么要加参数 c？');
     expect(codexPrompts[2]).toContain('app.ts');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('质疑 pass 丢弃误报 + wontFix 反馈注入下次 review + 度量落库', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-data3-'));
+    const config = { ...makeConfig(dataDir), challengeEnabled: true };
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    const reviewPrompts: string[] = [];
+    const codexRun = async (_worktree: string, prompt: string) => {
+      // 质疑 pass：index 0 判误报，index 1 证实
+      if (prompt.includes('待复核 findings')) {
+        return {
+          ok: true,
+          output: JSON.stringify({
+            verdicts: [
+              { index: 0, verdict: 'wrong', reason: '上游已判空' },
+              { index: 1, verdict: 'confirmed', reason: 'caller.ts 确实未同步' },
+            ],
+          }),
+        };
+      }
+      reviewPrompts.push(prompt);
+      return {
+        ok: true,
+        output: JSON.stringify({
+          summary: 'ok',
+          findings: [
+            { file: 'app.ts', line: 1, severity: 'suggestion', title: '疑似空指针', detail: 'x' },
+            { file: 'app.ts', line: 1, severity: 'must-fix', title: '调用方未同步', detail: 'y' },
+          ],
+          resolvedThreadIds: [],
+        }),
+      };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+    const key = 'Proj/Repo/1';
+
+    // ---------- 第一次 review：误报被拦截，真问题带复核标注 ----------
+    await pipeline.runFullReview(currentPr, 'PR 创建');
+
+    const inlinePosts = ado.calls.filter(
+      (c) => c.method === 'POST' && /\/threads\?/.test(c.url) && c.body.threadContext,
+    );
+    expect(inlinePosts).toHaveLength(1); // 误报没发出来
+    expect(inlinePosts[0].body.comments[0].content).toContain('调用方未同步');
+    expect(inlinePosts[0].body.comments[0].content).toContain('已二次复核');
+    const summaryPost = ado.calls.find(
+      (c) => c.method === 'POST' && /\/threads\?/.test(c.url) && !c.body.threadContext,
+    );
+    expect(summaryPost!.body.comments[0].content).toContain('二次复核丢弃了 1 条');
+
+    // 度量落库
+    const stats = db.statsOverview('2000-01-01 00:00:00');
+    expect(stats.runs).toBe(1);
+    expect(stats.droppedByChallenge).toBe(1);
+    expect(stats.findingsPosted).toBe(1);
+    expect(stats.mustFix).toBe(1);
+
+    // ---------- 人工 wontFix + 理由 → 下次 review 提示词带历史反馈 ----------
+    const findingThreadId = db.listOpenFindings(key)[0].threadId;
+    const thread = ado.threads.get(findingThreadId)!;
+    thread.status = 'wontFix';
+    thread.comments.push({
+      id: 999,
+      content: '业务上就是这样设计的',
+      author: { id: 'user-1', displayName: '开发者' },
+    });
+
+    await pipeline.runFullReview(currentPr, '/review 命令', true);
+
+    // 反馈已入库
+    expect(db.listOpenFindings(key)).toHaveLength(0);
+    const rejected = db.listRejectedFindings('Proj/Repo');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].note).toBe('业务上就是这样设计的');
+    // 第二次 review 的提示词包含被拒意见与理由
+    expect(reviewPrompts[1]).toContain('调用方未同步');
+    expect(reviewPrompts[1]).toContain('业务上就是这样设计的');
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

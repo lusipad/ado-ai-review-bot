@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { StateDb } from '../src/state/db';
-import { findingFingerprint } from '../src/util';
+import { findingFingerprint, msUntilNextWeekly } from '../src/util';
 
 let tmpDir: string;
 
@@ -37,20 +38,130 @@ describe('StateDb', () => {
   it('findings 指纹去重 + open 列表 + 标记修复', () => {
     const db = makeDb();
     const key = 'Proj/Repo/1';
+    const rKey = 'Proj/Repo';
     const fp = findingFingerprint('src/a.ts', '空指针风险');
 
-    db.insertFinding({ prKey: key, fingerprint: fp, threadId: 7, severity: 'must-fix', file: 'src/a.ts', title: '空指针风险', line: 10 });
+    db.insertFinding({ prKey: key, repoKey: rKey, fingerprint: fp, threadId: 7, severity: 'must-fix', file: 'src/a.ts', title: '空指针风险', line: 10 });
     expect(db.hasFingerprint(key, fp)).toBe(true);
     expect(db.hasFingerprint(key, 'other')).toBe(false);
 
     // 同指纹重复插入不报错、不重复
-    db.insertFinding({ prKey: key, fingerprint: fp, threadId: 8, severity: 'must-fix', file: 'src/a.ts', title: '空指针风险', line: 10 });
+    db.insertFinding({ prKey: key, repoKey: rKey, fingerprint: fp, threadId: 8, severity: 'must-fix', file: 'src/a.ts', title: '空指针风险', line: 10 });
     expect(db.listOpenFindings(key)).toHaveLength(1);
     expect(db.listOpenFindings(key)[0].threadId).toBe(7);
 
     db.markFindingFixed(key, 7);
     expect(db.listOpenFindings(key)).toHaveLength(0);
     db.close();
+  });
+
+  it('线程反馈：wontfix 记理由、进入拒绝清单，采纳率可查', () => {
+    const db = makeDb();
+    const rKey = 'Proj/Repo';
+    const mk = (pr: number, thread: number, title: string) =>
+      db.insertFinding({
+        prKey: `${rKey}/${pr}`,
+        repoKey: rKey,
+        fingerprint: findingFingerprint('a.ts', title),
+        threadId: thread,
+        severity: 'nit',
+        file: 'a.ts',
+        title,
+        line: 1,
+      });
+
+    mk(1, 10, '建议加注释');
+    mk(1, 11, '变量命名');
+    mk(2, 12, '空行过多');
+
+    db.updateFindingFeedback('Proj/Repo/1', 10, 'wontfix', '团队约定不强制注释');
+    db.updateFindingFeedback('Proj/Repo/1', 11, 'fixed');
+
+    const rejected = db.listRejectedFindings(rKey);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].title).toBe('建议加注释');
+    expect(rejected[0].note).toBe('团队约定不强制注释');
+
+    // 只允许 open → 终态：重复反馈不覆盖
+    db.updateFindingFeedback('Proj/Repo/1', 10, 'fixed');
+    expect(db.listRejectedFindings(rKey)).toHaveLength(1);
+
+    const acc = db.severityAcceptance(rKey, 'nit');
+    expect(acc).toEqual({ resolved: 2, accepted: 1 });
+
+    const byRepo = db.acceptanceByRepo('2000-01-01 00:00:00');
+    expect(byRepo).toHaveLength(1);
+    expect(byRepo[0]).toMatchObject({ repoKey: rKey, total: 3, accepted: 1, rejected: 1, open: 1 });
+    db.close();
+  });
+
+  it('review_runs 记录与聚合统计', () => {
+    const db = makeDb();
+    const base = {
+      prKey: 'P/R/1',
+      repoKey: 'P/R',
+      findingsTotal: 5,
+      findingsPosted: 3,
+      mustFix: 1,
+      droppedByChallenge: 2,
+      degraded: false,
+    };
+    db.insertReviewRun({ ...base, kind: 'full', ok: true, durationMs: 1000 });
+    db.insertReviewRun({ ...base, prKey: 'P/R/2', kind: 'incremental', ok: true, durationMs: 3000 });
+    db.insertReviewRun({ ...base, kind: 'qa', ok: false, durationMs: 500, error: '超时' });
+
+    const o = db.statsOverview('2000-01-01 00:00:00');
+    expect(o.runs).toBe(3);
+    expect(o.failures).toBe(1);
+    expect(o.prCount).toBe(2); // qa 不算 review 覆盖的 PR
+    expect(o.findingsPosted).toBe(9);
+    expect(o.mustFix).toBe(3);
+    expect(o.droppedByChallenge).toBe(6);
+    expect(o.byKind).toEqual({ full: 1, incremental: 1, qa: 1 });
+
+    // repo 过滤 + 时间窗过滤
+    expect(db.statsOverview('2000-01-01 00:00:00', 'Other/Repo').runs).toBe(0);
+    expect(db.statsOverview('2999-01-01 00:00:00').runs).toBe(0);
+    db.close();
+  });
+
+  it('老库迁移：无 repo_key 列时补列并回填', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-db-'));
+    const dbPath = path.join(tmpDir, 'state.db');
+    // 用旧 schema 建库
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE findings (
+        pr_key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', severity TEXT NOT NULL, file TEXT NOT NULL,
+        title TEXT NOT NULL, line INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (pr_key, fingerprint)
+      );
+      INSERT INTO findings (pr_key, fingerprint, thread_id, status, severity, file, title)
+      VALUES ('Proj/Repo/9', 'fp1', 1, 'open', 'nit', 'a.ts', '旧数据');
+    `);
+    legacy.close();
+
+    const db = new StateDb(dbPath);
+    const open = db.listOpenFindings('Proj/Repo/9');
+    expect(open).toHaveLength(1);
+    expect(open[0].repoKey).toBe('Proj/Repo');
+    db.close();
+  });
+});
+
+describe('msUntilNextWeekly', () => {
+  it('同周未到时点 → 本周；已过 → 下周；恰好在时点 → 整周', () => {
+    // 2026-07-08 是周三
+    const wed10 = new Date(2026, 6, 8, 10, 0, 0);
+    // 下周一 09:00 = 4 天 23 小时后
+    expect(msUntilNextWeekly(wed10, 1, 9)).toBe((4 * 24 + 23) * 3600_000);
+    // 本周五 09:00 = 1 天 23 小时后
+    expect(msUntilNextWeekly(wed10, 5, 9)).toBe((1 * 24 + 23) * 3600_000);
+    // 恰好周三 09:00 → 一整周
+    const wed9 = new Date(2026, 6, 8, 9, 0, 0);
+    expect(msUntilNextWeekly(wed9, 3, 9)).toBe(7 * 24 * 3600_000);
   });
 });
 

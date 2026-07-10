@@ -4,6 +4,7 @@ const EMOJI: Record<NotifyEvent['type'], string> = {
   review_completed: '✅',
   must_fix_found: '🔴',
   job_failed: '⚠️',
+  weekly_report: '📊',
 };
 
 /** RocketChat Incoming Webhook Integration */

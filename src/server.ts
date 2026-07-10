@@ -9,7 +9,9 @@ import { Workspace } from './repo/workspace';
 import { Scheduler } from './queue/scheduler';
 import { Pipeline, type PipelineDeps } from './pipeline';
 import { NotifyDispatcher } from './notify';
-import { prKey as toPrKey } from './types';
+import { prKey as toPrKey, type Logger } from './types';
+import { collectStats, formatWeeklyReport } from './stats';
+import { msUntilNextWeekly } from './util';
 
 export interface AppDeps {
   config: Config;
@@ -48,6 +50,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   const { config, db, scheduler, pipeline } = deps;
 
   app.get('/healthz', async () => ({ ok: true }));
+
+  // 度量：与 webhook 相同的密钥鉴权（x-webhook-secret 头或 basic auth 密码）
+  app.get('/stats', async (req, reply) => {
+    if (!isAuthorized(req.headers, config.webhookSecret)) {
+      return reply.status(401).send({ error: 'unauthorized' });
+    }
+    const q = req.query as { days?: string; repo?: string };
+    const days = Math.min(365, Math.max(1, Number(q.days) || 30));
+    return collectStats(deps.db, days, q.repo || undefined);
+  });
 
   app.post('/webhook/ado', async (req, reply) => {
     if (!isAuthorized(req.headers, config.webhookSecret)) {
@@ -160,6 +172,30 @@ export function createApp(config: Config): { app: FastifyInstance; deps: AppDeps
   return { app, deps };
 }
 
+/** 每周一 09:00（服务器本地时区）推送度量周报；定时器 unref，不阻止进程退出 */
+export function scheduleWeeklyReport(deps: AppDeps, logger: Logger): void {
+  const tick = () => {
+    const delay = msUntilNextWeekly(new Date(), 1, 9);
+    const timer = setTimeout(() => {
+      try {
+        deps.notify.dispatch({
+          type: 'weekly_report',
+          repoKey: '',
+          title: '🤖 AI Review 周报',
+          text: formatWeeklyReport(collectStats(deps.db, 7)),
+        });
+        logger.info({}, '周报已推送');
+      } catch (err) {
+        logger.error({ err: String(err) }, '周报生成失败');
+      } finally {
+        tick();
+      }
+    }, delay);
+    timer.unref();
+  };
+  tick();
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const { app, deps } = createApp(config);
@@ -173,6 +209,7 @@ async function main(): Promise<void> {
     );
   }
   await deps.workspace.cleanupOrphans();
+  if (config.weeklyReportEnabled) scheduleWeeklyReport(deps, app.log);
   await app.listen({ host: config.host, port: config.port });
   app.log.info(
     { port: config.port, dataDir: config.dataDir },

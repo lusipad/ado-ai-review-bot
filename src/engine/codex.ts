@@ -89,21 +89,23 @@ export async function runCodex(
 
 const SEVERITIES: Severity[] = ['must-fix', 'suggestion', 'nit'];
 
-/**
- * 从模型输出中提取结构化 review 结果。
- * 依次尝试：```json 围栏块（取最后一个）→ 整体就是 JSON → 最后一个平衡的 {...}。
- * 全部失败 → degraded 模式，原文作为 summary。
- */
-export function parseReviewOutput(raw: string): ReviewOutput {
+/** JSON 候选：```json 围栏块（后出现的优先）→ 整体就是 JSON → 最后一个平衡的 {...} */
+function jsonCandidates(raw: string): string[] {
   const candidates: string[] = [];
-
   const fenceMatches = [...raw.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)];
   for (const m of fenceMatches.reverse()) candidates.push(m[1]);
   candidates.push(raw.trim());
   const lastBrace = extractLastJsonObject(raw);
   if (lastBrace) candidates.push(lastBrace);
+  return candidates;
+}
 
-  for (const c of candidates) {
+/**
+ * 从模型输出中提取结构化 review 结果。
+ * 全部候选解析失败 → degraded 模式，原文作为 summary。
+ */
+export function parseReviewOutput(raw: string): ReviewOutput {
+  for (const c of jsonCandidates(raw)) {
     try {
       const obj = JSON.parse(c);
       if (obj && typeof obj === 'object' && typeof obj.summary === 'string') {
@@ -124,6 +126,43 @@ export function parseReviewOutput(raw: string): ReviewOutput {
   }
 
   return { summary: raw.trim(), findings: [], resolvedThreadIds: [], degraded: true };
+}
+
+export type ChallengeVerdict = {
+  index: number;
+  verdict: 'confirmed' | 'uncertain' | 'wrong';
+  reason?: string;
+};
+
+/**
+ * 解析质疑 pass 的输出：{"verdicts":[{index, verdict, reason}]}。
+ * 解析失败返回 undefined（调用方 fail-open：保留全部 findings）。
+ */
+export function parseChallengeVerdicts(raw: string): ChallengeVerdict[] | undefined {
+  const VERDICTS = ['confirmed', 'uncertain', 'wrong'];
+  for (const c of jsonCandidates(raw)) {
+    try {
+      const obj = JSON.parse(c);
+      if (obj && typeof obj === 'object' && Array.isArray(obj.verdicts)) {
+        const out: ChallengeVerdict[] = [];
+        for (const v of obj.verdicts) {
+          if (!v || typeof v !== 'object') continue;
+          const index = Number(v.index);
+          if (!Number.isInteger(index) || index < 0) continue;
+          if (!VERDICTS.includes(v.verdict)) continue;
+          out.push({
+            index,
+            verdict: v.verdict,
+            reason: typeof v.reason === 'string' ? v.reason : undefined,
+          });
+        }
+        return out;
+      }
+    } catch {
+      // 尝试下一个候选
+    }
+  }
+  return undefined;
 }
 
 function sanitizeFindings(input: unknown): Finding[] {

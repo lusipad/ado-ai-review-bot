@@ -9,6 +9,7 @@ const COLOR: Record<NotifyEvent['type'], string> = {
   review_completed: 'info',
   must_fix_found: 'warning',
   job_failed: 'warning',
+  weekly_report: 'info',
 };
 
 /** 企业微信群机器人 */

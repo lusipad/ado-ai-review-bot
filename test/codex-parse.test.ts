@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseReviewOutput } from '../src/engine/codex';
+import { parseReviewOutput, parseChallengeVerdicts } from '../src/engine/codex';
 import { renderTemplate } from '../src/engine/prompts';
 
 describe('parseReviewOutput', () => {
@@ -61,6 +61,28 @@ describe('parseReviewOutput', () => {
   it('resolvedThreadIds 过滤非整数', () => {
     const out = parseReviewOutput('{"summary":"s","findings":[],"resolvedThreadIds":[1,"x",2.5,3]}');
     expect(out.resolvedThreadIds).toEqual([1, 3]);
+  });
+});
+
+describe('parseChallengeVerdicts', () => {
+  it('解析围栏 JSON 的 verdicts', () => {
+    const raw = '核实过程……\n```json\n{"verdicts":[{"index":0,"verdict":"confirmed","reason":"caller.ts:20 确实未更新"},{"index":1,"verdict":"wrong","reason":"上游已判空"}]}\n```';
+    const v = parseChallengeVerdicts(raw)!;
+    expect(v).toHaveLength(2);
+    expect(v[0]).toMatchObject({ index: 0, verdict: 'confirmed' });
+    expect(v[1]).toMatchObject({ index: 1, verdict: 'wrong', reason: '上游已判空' });
+  });
+
+  it('清洗非法项：负 index、未知 verdict 丢弃', () => {
+    const v = parseChallengeVerdicts(
+      '{"verdicts":[{"index":-1,"verdict":"wrong"},{"index":0,"verdict":"maybe"},{"index":2,"verdict":"uncertain"}]}',
+    )!;
+    expect(v).toEqual([{ index: 2, verdict: 'uncertain', reason: undefined }]);
+  });
+
+  it('无法解析 → undefined（fail-open）', () => {
+    expect(parseChallengeVerdicts('一段散文')).toBeUndefined();
+    expect(parseChallengeVerdicts('{"summary":"不是 verdicts 结构"}')).toBeUndefined();
   });
 });
 

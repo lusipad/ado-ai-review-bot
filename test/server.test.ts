@@ -150,3 +150,34 @@ describe('isAuthorized', () => {
     expect(isAuthorized({ 'x-webhook-secret': SECRET }, SECRET)).toBe(true);
   });
 });
+
+describe('/stats', () => {
+  it('无密钥 401；带密钥返回聚合统计', async () => {
+    db.insertReviewRun({
+      prKey: 'P/R/1',
+      repoKey: 'P/R',
+      kind: 'full',
+      ok: true,
+      durationMs: 1200,
+      findingsTotal: 3,
+      findingsPosted: 2,
+      mustFix: 1,
+      droppedByChallenge: 1,
+      degraded: false,
+    });
+
+    const noAuth = await app.inject({ method: 'GET', url: '/stats' });
+    expect(noAuth.statusCode).toBe(401);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/stats?days=7',
+      headers: { 'x-webhook-secret': SECRET },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.windowDays).toBe(7);
+    expect(body.overview).toMatchObject({ runs: 1, findingsPosted: 2, mustFix: 1, droppedByChallenge: 1 });
+    expect(Array.isArray(body.acceptanceByRepo)).toBe(true);
+  });
+});

@@ -47,6 +47,19 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * 距下一个「周 weekday 的 hour 点整」（服务器本地时区）的毫秒数。
+ * weekday: 0=周日 … 6=周六。恰好落在时点上时返回一整周（避免重复触发）。
+ */
+export function msUntilNextWeekly(now: Date, weekday: number, hour: number): number {
+  const next = new Date(now);
+  next.setHours(hour, 0, 0, 0);
+  const dayDiff = (weekday - now.getDay() + 7) % 7;
+  next.setDate(next.getDate() + dayDiff);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 7);
+  return next.getTime() - now.getTime();
+}
+
 /** 按 UTF-8 字节数截断（企业微信 markdown 4096 字节上限用） */
 export function truncateUtf8Bytes(text: string, maxBytes: number, suffix = '…'): string {
   const buf = Buffer.from(text, 'utf8');

@@ -29,6 +29,10 @@ export interface Finding {
   severity: Severity;
   title: string;
   detail: string;
+  /** 质疑 pass 复核结果：confirmed=有代码依据证实；uncertain=无法证实也无法否定 */
+  verification?: 'confirmed' | 'uncertain';
+  /** 复核给出的代码依据（confirmed 时展示） */
+  verificationNote?: string;
 }
 
 export interface ReviewOutput {

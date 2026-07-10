@@ -4,7 +4,7 @@ import { RocketChatNotifier } from './rocketchat';
 import { WeComNotifier } from './wecom';
 import { sleep } from '../util';
 
-export type NotifyEventType = 'review_completed' | 'must_fix_found' | 'job_failed';
+export type NotifyEventType = 'review_completed' | 'must_fix_found' | 'job_failed' | 'weekly_report';
 
 export interface NotifyEvent {
   type: NotifyEventType;
