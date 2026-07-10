@@ -56,10 +56,15 @@ export interface Config {
   /** 非超时失败的自动重试次数 */
   codexRetries: number;
   /**
-   * 多模型交叉 review：codex config.toml 里的 profile 名列表，每个 profile 独立
-   * review 后合并 findings。'default' 表示不带 -p 的默认配置。
+   * 多模型交叉 review 的 profile 列表，独立 review 后合并 findings。
+   * 支持 engine 前缀：'deepseek'（默认引擎的 profile）、'claude'、'claude:opus'、
+   * 'codex:deepseek'。'default' = 默认引擎默认配置。
    */
   reviewProfiles: string[];
+  /** 无 engine 前缀时使用的默认引擎 */
+  reviewEngine: 'codex' | 'claude';
+  claudeBin: string;
+  claudeExtraArgs: string[];
   /** 沟通风格卡，注入 review/问答/修复的提示词 */
   persona: string;
   /** 优雅停机时等待在跑任务收尾的最长时间（毫秒） */
@@ -154,6 +159,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    reviewEngine: env.REVIEW_ENGINE === 'claude' ? 'claude' : 'codex',
+    claudeBin: env.CLAUDE_BIN ?? 'claude',
+    claudeExtraArgs: (env.CLAUDE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
     persona: env.PERSONA || DEFAULT_PERSONA,
     shutdownGraceMs: num(env, 'SHUTDOWN_GRACE_MS', 2 * 60 * 1000),
 

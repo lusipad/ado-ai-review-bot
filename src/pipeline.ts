@@ -18,6 +18,7 @@ import {
   parseDreamOutput,
   type CodexRunResult,
 } from './engine/codex';
+import { runClaude } from './engine/claude';
 import { NotifyDispatcher } from './notify';
 import { KnowledgeStore, normalizeMemoryType } from './knowledge';
 
@@ -50,6 +51,20 @@ interface RepoYamlConfig {
   knowledgeBase?: boolean;
   profiles?: string[];
   persona?: string;
+}
+
+/**
+ * 解析 profile 的 engine 前缀：'claude' / 'claude:opus' / 'codex:deepseek' / 'deepseek'（默认引擎）。
+ * 返回 name 为该引擎内的 profile/模型名（codex = config.toml profile，claude = --model 别名）。
+ */
+export function parseEngineProfile(
+  profile: string | undefined,
+  defaultEngine: 'codex' | 'claude',
+): { engine: 'codex' | 'claude'; name?: string } {
+  if (!profile || profile === 'default') return { engine: defaultEngine };
+  const m = /^(codex|claude)(?::(.+))?$/.exec(profile);
+  if (m) return { engine: m[1] as 'codex' | 'claude', name: m[2] };
+  return { engine: defaultEngine, name: profile };
 }
 
 /** /fix 不允许修改的路径：评审配置、团队规范、CI 流水线（防自我提权与注入放大） */
@@ -162,21 +177,38 @@ export class Pipeline {
   constructor(private readonly deps: PipelineDeps) {
     this.codexRun =
       deps.codexRun ??
-      ((worktree, prompt, opts) =>
-        runCodex(
+      ((worktree, prompt, opts) => {
+        const ep = parseEngineProfile(opts?.profile, deps.config.reviewEngine);
+        if (ep.engine === 'claude') {
+          return runClaude(
+            {
+              bin: deps.config.claudeBin,
+              timeoutMs: deps.config.codexTimeoutMs,
+              extraArgs: deps.config.claudeExtraArgs,
+              sandbox: opts?.sandbox ?? deps.config.codexSandbox,
+              model: ep.name,
+              images: opts?.images,
+              logger: deps.logger,
+            },
+            worktree,
+            prompt,
+          );
+        }
+        return runCodex(
           {
             bin: deps.config.codexBin,
             sandbox: opts?.sandbox ?? deps.config.codexSandbox,
             timeoutMs: deps.config.codexTimeoutMs,
             extraArgs: deps.config.codexExtraArgs,
-            profile: opts?.profile,
+            profile: ep.name,
             images: opts?.images,
             skipGitCheck: opts?.skipGitCheck,
             logger: deps.logger,
           },
           worktree,
           prompt,
-        ));
+        );
+      });
     this.knowledge = new KnowledgeStore(path.join(deps.config.dataDir, 'knowledge'));
   }
 
