@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Pipeline } from '../src/pipeline';
+import { Pipeline, mergeReviewOutputs } from '../src/pipeline';
 import { StateDb } from '../src/state/db';
 import { Workspace } from '../src/repo/workspace';
 import { AdoClient } from '../src/ado/client';
@@ -152,6 +152,8 @@ function makeConfig(dataDir: string): Config {
     codexSandbox: 'read-only',
     codexExtraArgs: [],
     codexRetries: 1,
+    reviewProfiles: ['default'],
+    shutdownGraceMs: 1000,
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
@@ -165,6 +167,44 @@ function makeConfig(dataDir: string): Config {
     repoOverrides: {},
   };
 }
+
+describe('mergeReviewOutputs', () => {
+  const out = (over: Record<string, unknown>) => ({
+    summary: 's', findings: [], resolvedThreadIds: [], degraded: false, ...over,
+  }) as any;
+
+  it('指纹相同或近邻行合并，agreedBy 累计；resolved 取交集；risk 取最严重', () => {
+    const a = out({
+      riskLevel: 'medium',
+      resolvedThreadIds: [1, 2],
+      findings: [
+        { file: 'a.ts', line: 10, severity: 'must-fix', title: '空指针风险', detail: 'aa' },
+        { file: 'b.ts', line: 5, severity: 'nit', title: '仅 A 发现', detail: 'a-only' },
+      ],
+    });
+    const b = out({
+      riskLevel: 'high',
+      resolvedThreadIds: [2, 3],
+      findings: [
+        { file: 'a.ts', line: 11, severity: 'must-fix', title: '可能出现空引用', detail: 'bbbb 更长' },
+        { file: 'c.ts', line: 1, severity: 'suggestion', title: '仅 B 发现', detail: 'b-only' },
+      ],
+    });
+    const m = mergeReviewOutputs([a, b]);
+    expect(m.findings).toHaveLength(3);
+    const common = m.findings.find((f) => f.file === 'a.ts' && f.line === 10)!;
+    expect(common.agreedBy).toBe(2);
+    expect(common.detail).toBe('bbbb 更长');
+    expect(m.resolvedThreadIds).toEqual([2]);
+    expect(m.riskLevel).toBe('high');
+  });
+
+  it('同文件近邻行但严重度不同 → 不合并', () => {
+    const a = out({ findings: [{ file: 'a.ts', line: 10, severity: 'must-fix', title: 'x', detail: '' }] });
+    const b = out({ findings: [{ file: 'a.ts', line: 10, severity: 'nit', title: 'y', detail: '' }] });
+    expect(mergeReviewOutputs([a, b]).findings).toHaveLength(2);
+  });
+});
 
 describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
   const prInfo = (source: string, merge?: string): PrInfo => ({
@@ -561,6 +601,71 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     // 手动 /review 不受幂等限制
     await pipeline.runFullReview(currentPr, '/review 命令', true);
     expect(calls).toBe(3);
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('多模型交叉：各 profile 独立跑，findings 合并、双命中标注、语言清单与导读注入', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-mm-'));
+    const config = { ...makeConfig(dataDir), reviewProfiles: ['default', 'deepseek'] };
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+
+    const profilesSeen: (string | undefined)[] = [];
+    let lastPrompt = '';
+    const codexRun = async (_wt: string, prompt: string, opts?: { profile?: string }) => {
+      profilesSeen.push(opts?.profile);
+      lastPrompt = prompt;
+      // 两个模型：一个共同 finding（措辞不同但同文件近邻行）+ 各自一个独有 finding
+      const isDeepseek = opts?.profile === 'deepseek';
+      return {
+        ok: true,
+        output: JSON.stringify({
+          summary: isDeepseek ? 'deepseek 视角' : '主模型视角',
+          reviewerGuide: isDeepseek ? undefined : '- 重点看 app.ts 的签名变更是否影响业务',
+          riskLevel: isDeepseek ? 'high' : 'medium',
+          findings: [
+            isDeepseek
+              ? { file: 'app.ts', line: 2, severity: 'must-fix', title: '调用点未同步更新', detail: '较长的说明文本来自 deepseek' }
+              : { file: 'app.ts', line: 1, severity: 'must-fix', title: '调用方未更新', detail: '短说明' },
+            isDeepseek
+              ? { file: 'app.ts', line: 9, severity: 'nit', title: 'deepseek 独有发现', detail: 'd' }
+              : { file: 'app.ts', line: 5, severity: 'suggestion', title: '主模型独有发现', detail: 'm' },
+          ],
+          resolvedThreadIds: isDeepseek ? [7, 8] : [7],
+        }),
+      };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun });
+
+    await pipeline.runFullReview(currentPr, 'PR 创建');
+
+    // 两个 profile 都被调用
+    expect(profilesSeen.sort()).toEqual(['deepseek', 'default'].sort());
+    // 语言清单注入（app.ts → typescript 清单）
+    expect(lastPrompt).toContain('TypeScript / JavaScript 专项检查');
+
+    const inlinePosts = ado.calls.filter(
+      (c) => c.method === 'POST' && /\/threads\?/.test(c.url) && c.body.threadContext,
+    );
+    // 合并后 3 条：共同 1 条（near-line 合并）+ 各自独有 2 条
+    expect(inlinePosts).toHaveLength(3);
+    const common = inlinePosts.find((c) => c.body.comments[0].content.includes('调用方未更新'));
+    expect(common!.body.comments[0].content).toContain('2 个模型独立发现');
+    expect(common!.body.comments[0].content).toContain('较长的说明文本来自 deepseek'); // 保留更详尽说明
+
+    // 总评包含导读，风险取最严重
+    const summary = ado.calls.find(
+      (c) => c.method === 'POST' && /\/threads\?/.test(c.url) && !c.body.threadContext,
+    );
+    expect(summary!.body.comments[0].content).toContain('👀 给人工审阅者');
+    expect(summary!.body.comments[0].content).toContain('**整体风险**：high');
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

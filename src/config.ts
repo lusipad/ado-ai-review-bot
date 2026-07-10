@@ -20,6 +20,8 @@ export interface RepoOverrides {
   challenge?: boolean;
   allowFix?: boolean;
   knowledgeBase?: boolean;
+  /** 多模型交叉 review 的 codex profile 列表（覆盖全局 REVIEW_PROFILES） */
+  profiles?: string[];
   notify?: Partial<NotifyConfig>;
 }
 
@@ -51,6 +53,11 @@ export interface Config {
   codexExtraArgs: string[];
   /** 非超时失败的自动重试次数 */
   codexRetries: number;
+  /**
+   * 多模型交叉 review：codex config.toml 里的 profile 名列表，每个 profile 独立
+   * review 后合并 findings。'default' 表示不带 -p 的默认配置。
+   */
+  reviewProfiles: string[];
   /** 优雅停机时等待在跑任务收尾的最长时间（毫秒） */
   shutdownGraceMs: number;
 
@@ -122,6 +129,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexSandbox: env.CODEX_SANDBOX ?? 'read-only',
     codexExtraArgs: (env.CODEX_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
     codexRetries: num(env, 'CODEX_RETRIES', 1),
+    reviewProfiles: (env.REVIEW_PROFILES ?? 'default')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     shutdownGraceMs: num(env, 'SHUTDOWN_GRACE_MS', 2 * 60 * 1000),
 
     maxInlineComments: num(env, 'MAX_INLINE_COMMENTS', 10),

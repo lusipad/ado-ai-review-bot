@@ -33,12 +33,16 @@ export interface Finding {
   verification?: 'confirmed' | 'uncertain';
   /** 复核给出的代码依据（confirmed 时展示） */
   verificationNote?: string;
+  /** 多模型交叉：独立发现此问题的模型数（>1 时评论中标注） */
+  agreedBy?: number;
 }
 
 export interface ReviewOutput {
   summary: string;
   walkthrough?: string;
   riskLevel?: string;
+  /** 给人类 reviewer 的导读：最需要人工把关的位置与可略过的部分 */
+  reviewerGuide?: string;
   findings: Finding[];
   /** 增量 review：模型判定已被新提交修复的旧 finding 线程 id */
   resolvedThreadIds: number[];

@@ -43,11 +43,24 @@ interface RepoYamlConfig {
   challenge?: boolean;
   allowFix?: boolean;
   knowledgeBase?: boolean;
+  profiles?: string[];
 }
+
+/** 变更文件扩展名 → prompts/checklists/ 下的专项清单 */
+const CHECKLIST_BY_EXT: Record<string, string> = {
+  '.c': 'cpp', '.cc': 'cpp', '.cpp': 'cpp', '.cxx': 'cpp', '.h': 'cpp', '.hpp': 'cpp', '.hxx': 'cpp',
+  '.cs': 'csharp',
+  '.ts': 'typescript', '.tsx': 'typescript', '.js': 'typescript', '.jsx': 'typescript',
+  '.mjs': 'typescript', '.cjs': 'typescript', '.vue': 'typescript',
+  '.py': 'python',
+  '.java': 'java',
+  '.go': 'go',
+};
 
 interface EffectiveRepoConfig extends Required<Pick<RepoYamlConfig, 'autoReview' | 'maxInlineComments' | 'minSeverity' | 'challenge' | 'allowFix' | 'knowledgeBase'>> {
   ignorePaths: string[];
   focus: string;
+  profiles: string[];
   /** minSeverity 是被采纳率数据自动收紧的（总评里要向用户说明） */
   autoTightened: boolean;
 }
@@ -69,7 +82,7 @@ export interface FixJob {
 export type CodexRunner = (
   worktree: string,
   prompt: string,
-  opts?: { sandbox?: string },
+  opts?: { sandbox?: string; profile?: string },
 ) => Promise<CodexRunResult>;
 
 export interface PipelineDeps {
@@ -81,6 +94,42 @@ export interface PipelineDeps {
   logger: Logger;
   /** 可注入，测试时替换真实 codex 子进程 */
   codexRun?: CodexRunner;
+}
+
+/**
+ * 多模型 findings 合并：指纹相同，或同文件近邻行号（±2）且同严重度，视为同一问题；
+ * agreedBy 记录独立命中的模型数。resolvedThreadIds 取交集（错关线程比漏关更糟），
+ * riskLevel 取最严重。
+ */
+export function mergeReviewOutputs(outputs: ReviewOutput[]): ReviewOutput {
+  const primary = outputs[0];
+  const merged: Finding[] = [];
+  for (const out of outputs) {
+    for (const f of out.findings) {
+      const dup = merged.find(
+        (m) =>
+          findingFingerprint(m.file, m.title) === findingFingerprint(f.file, f.title) ||
+          (m.file === f.file && Math.abs(m.line - f.line) <= 2 && m.severity === f.severity),
+      );
+      if (dup) {
+        dup.agreedBy = (dup.agreedBy ?? 1) + 1;
+        if (f.detail.length > dup.detail.length) dup.detail = f.detail; // 保留更详尽的说明
+      } else {
+        merged.push({ ...f, agreedBy: 1 });
+      }
+    }
+  }
+  const resolved = outputs
+    .map((o) => new Set(o.resolvedThreadIds))
+    .reduce((a, b) => new Set([...a].filter((x) => b.has(x))));
+  const RISK = ['low', 'medium', 'high'];
+  const maxRisk = Math.max(...outputs.map((o) => RISK.indexOf((o.riskLevel ?? '').toLowerCase())));
+  return {
+    ...primary,
+    findings: merged,
+    resolvedThreadIds: [...resolved],
+    riskLevel: maxRisk >= 0 ? RISK[maxRisk] : primary.riskLevel,
+  };
 }
 
 export class Pipeline {
@@ -97,6 +146,7 @@ export class Pipeline {
             sandbox: opts?.sandbox ?? deps.config.codexSandbox,
             timeoutMs: deps.config.codexTimeoutMs,
             extraArgs: deps.config.codexExtraArgs,
+            profile: opts?.profile,
             logger: deps.logger,
           },
           worktree,
@@ -222,11 +272,10 @@ export class Pipeline {
           : '（无）',
         repo_map: this.repoMapFor(rKey, conf),
         work_items: workItemsText,
+        language_checklists: this.languageChecklists(changedFiles),
       });
 
-      const result = await this.codexRunWithRetry(worktree, prompt);
-      if (!result.ok) throw new Error(result.error ?? 'codex 执行失败');
-      const output = parseReviewOutput(result.output);
+      const output = await this.runMultiModelReview(worktree, prompt, conf.profiles);
 
       // 质疑 pass：独立复核 findings，丢弃被证伪的（fail-open：复核失败保留全部）
       const findingsTotal = output.findings.length;
@@ -338,7 +387,7 @@ export class Pipeline {
   private async codexRunWithRetry(
     worktree: string,
     prompt: string,
-    opts?: { sandbox?: string },
+    opts?: { sandbox?: string; profile?: string },
   ): Promise<CodexRunResult> {
     const retries = this.deps.config.codexRetries;
     let last: CodexRunResult = { ok: false, output: '', error: '未执行' };
@@ -355,6 +404,49 @@ export class Pipeline {
       }
     }
     return last;
+  }
+
+  /** 按变更文件扩展名拼接语言专项清单（prompts/checklists/ 下的模板可自行增删改） */
+  private languageChecklists(changedFiles: string[]): string {
+    const langs = new Set<string>();
+    for (const f of changedFiles) {
+      const lang = CHECKLIST_BY_EXT[path.extname(f).toLowerCase()];
+      if (lang) langs.add(lang);
+    }
+    const parts: string[] = [];
+    for (const lang of langs) {
+      const p = path.join(this.deps.config.promptsDir, 'checklists', `${lang}.md`);
+      if (fs.existsSync(p)) parts.push(fs.readFileSync(p, 'utf8').trim());
+    }
+    return parts.length ? parts.join('\n\n') : '（无）';
+  }
+
+  /** 多模型交叉：各 profile 独立 review，合并 findings（并行执行，注意实际 codex 并发翻倍） */
+  private async runMultiModelReview(
+    worktree: string,
+    prompt: string,
+    profiles: string[],
+  ): Promise<ReviewOutput> {
+    const { logger } = this.deps;
+    const results = await Promise.all(
+      profiles.map(async (profile) => ({
+        profile,
+        result: await this.codexRunWithRetry(worktree, prompt, { profile }),
+      })),
+    );
+    for (const r of results.filter((x) => !x.result.ok)) {
+      logger.warn({ profile: r.profile, err: r.result.error?.slice(0, 300) }, '该模型 review 失败');
+    }
+    const ok = results.filter((x) => x.result.ok);
+    if (ok.length === 0) throw new Error(results[0]?.result.error ?? 'codex 执行失败');
+
+    const parsed = ok.map((x) => ({ profile: x.profile, out: parseReviewOutput(x.result.output) }));
+    // 有结构化结果就丢弃降级的（原文 summary 无法参与合并）
+    const usable = parsed.filter((p) => !p.out.degraded);
+    const chosen = usable.length > 0 ? usable : parsed.slice(0, 1);
+    if (chosen.length === 1) return chosen[0].out;
+    logger.info({ profiles: chosen.map((c) => c.profile) }, '多模型结果合并');
+    return mergeReviewOutputs(chosen.map((c) => c.out));
   }
 
   /** PR 关联工作项 → 提示词文本（最多 3 个） */
@@ -693,6 +785,9 @@ export class Pipeline {
 
   private formatFindingComment(f: Finding): string {
     const parts = [`**${SEVERITY_LABEL[f.severity]}** ${f.title}`, f.detail];
+    if (f.agreedBy && f.agreedBy > 1) {
+      parts.push(`> 🤝 ${f.agreedBy} 个模型独立发现了此问题`);
+    }
     if (f.verification === 'confirmed') {
       parts.push(`> ✅ 已二次复核${f.verificationNote ? `：${f.verificationNote}` : ''}`);
     } else if (f.verification === 'uncertain') {
@@ -715,6 +810,7 @@ export class Pipeline {
     parts.push(kind === 'incremental' ? '_（增量 review：仅针对最新 push 的变更）_' : '');
     parts.push('### 摘要', output.summary);
     if (output.walkthrough) parts.push('### 变更导览', output.walkthrough);
+    if (output.reviewerGuide) parts.push('### 👀 给人工审阅者', output.reviewerGuide);
     if (output.riskLevel) parts.push(`**整体风险**：${output.riskLevel}`);
     if (inlineCount > 0) parts.push(`已就 ${inlineCount} 个问题添加行内评论。`);
     if (meta.droppedByChallenge > 0)
@@ -891,6 +987,7 @@ export class Pipeline {
       challenge: yamlConf.challenge ?? override.challenge ?? config.challengeEnabled,
       allowFix: yamlConf.allowFix ?? override.allowFix ?? config.fixEnabled,
       knowledgeBase: yamlConf.knowledgeBase ?? override.knowledgeBase ?? config.knowledgeEnabled,
+      profiles: yamlConf.profiles ?? override.profiles ?? config.reviewProfiles,
       autoTightened,
     };
   }

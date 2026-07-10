@@ -9,6 +9,8 @@ export interface CodexOptions {
   sandbox: string;
   timeoutMs: number;
   extraArgs: string[];
+  /** codex config.toml 里的 profile 名；'default' 或空 = 不传 -p（用默认配置） */
+  profile?: string;
   logger: Logger;
 }
 
@@ -40,6 +42,7 @@ export async function runCodex(
     worktree,
     '--output-last-message',
     outFile,
+    ...(opts.profile && opts.profile !== 'default' ? ['-p', opts.profile] : []),
     ...opts.extraArgs,
     '-', // 从 stdin 读提示词
   ];
@@ -114,6 +117,7 @@ export function parseReviewOutput(raw: string): ReviewOutput {
           summary: obj.summary,
           walkthrough: typeof obj.walkthrough === 'string' ? obj.walkthrough : undefined,
           riskLevel: typeof obj.riskLevel === 'string' ? obj.riskLevel : undefined,
+          reviewerGuide: typeof obj.reviewerGuide === 'string' ? obj.reviewerGuide : undefined,
           findings: sanitizeFindings(obj.findings),
           resolvedThreadIds: Array.isArray(obj.resolvedThreadIds)
             ? obj.resolvedThreadIds.filter((n: unknown) => Number.isInteger(n))
