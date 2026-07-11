@@ -184,6 +184,48 @@ export class AdoClient {
     });
   }
 
+  /** 单个工作项详情（含关联 PR，讨论组功能用） */
+  async getWorkItemDetail(id: number): Promise<{
+    id: number;
+    type: string;
+    title: string;
+    state: string;
+    assignedTo?: string;
+    description: string;
+    prLinks: Array<{ projectId: string; repoId: string; pullRequestId: number }>;
+  }> {
+    const res = await this.request<{
+      id: number;
+      fields?: Record<string, unknown>;
+      relations?: Array<{ rel?: string; url?: string }>;
+    }>('GET', `/_apis/wit/workitems/${id}?$expand=relations`);
+    const f = res.fields ?? {};
+    const desc = [f['System.Description'], f['Microsoft.VSTS.Common.AcceptanceCriteria']]
+      .filter((s) => typeof s === 'string' && s)
+      .join('\n验收标准：');
+    const prLinks: Array<{ projectId: string; repoId: string; pullRequestId: number }> = [];
+    for (const rel of res.relations ?? []) {
+      // vstfs:///Git/PullRequestId/{projectId}%2F{repoId}%2F{prId}
+      const m = /^vstfs:\/\/\/Git\/PullRequestId\/(.+)$/i.exec(rel.url ?? '');
+      if (rel.rel === 'ArtifactLink' && m) {
+        const parts = decodeURIComponent(m[1]).split('/');
+        if (parts.length === 3 && Number.isInteger(Number(parts[2]))) {
+          prLinks.push({ projectId: parts[0], repoId: parts[1], pullRequestId: Number(parts[2]) });
+        }
+      }
+    }
+    const assigned = f['System.AssignedTo'] as { displayName?: string } | string | undefined;
+    return {
+      id: res.id,
+      type: String(f['System.WorkItemType'] ?? ''),
+      title: String(f['System.Title'] ?? ''),
+      state: String(f['System.State'] ?? ''),
+      assignedTo: typeof assigned === 'object' ? assigned?.displayName : assigned,
+      description: stripHtml(desc).slice(0, 1500),
+      prLinks,
+    };
+  }
+
   /** 下载 ADO 附件（评论里的截图等）。只允许本 ADO 主机，防止把 PAT 发给外部地址 */
   async downloadAttachment(url: string): Promise<Buffer> {
     const target = new URL(url, this.baseUrl + '/');

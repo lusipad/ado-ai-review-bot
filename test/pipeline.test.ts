@@ -879,6 +879,69 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }, 60_000);
 
+  it('工作项讨论组：卡片 + 关联 PR 状态 + 影响面分析入讨论', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-wi-'));
+    const config = makeConfig(dataDir);
+    const currentPr = prInfo(featureHead, mergeHead);
+    const ado = makeMockAdo(() => prResourceOf(currentPr));
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    await workspace.ensureMirror('Proj/Repo', originDir);
+    // 该 PR 有一条未解决 must-fix（应出现在卡片里）
+    db.insertFinding({
+      prKey: 'Proj/Repo/1', repoKey: 'Proj/Repo', fingerprint: 'fp-wi', threadId: 3,
+      severity: 'must-fix', file: 'app.ts', title: '未解决', line: 1,
+    });
+
+    const rcCalls: Array<{ url: string; body: any }> = [];
+    const rcFetch = (async (url: any, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : undefined;
+      rcCalls.push({ url: String(url), body });
+      if (String(url).includes('chat.postMessage')) return new Response(JSON.stringify({ success: true, message: { _id: 'm' + rcCalls.length } }));
+      if (String(url).includes('rooms.createDiscussion')) return new Response(JSON.stringify({ success: true, discussion: { _id: 'disc-wi' } }));
+      return new Response(JSON.stringify({ success: true }));
+    }) as typeof fetch;
+    const { RocketChatClient } = await import('../src/rocketchat');
+    const rc = new RocketChatClient({ baseUrl: 'http://rc.local', userId: 'u', token: 't', fetchFn: rcFetch });
+
+    // mock ADO：工作项详情端点
+    const origFetch = ado.fetchFn;
+    const adoFetch = (async (url: any, init: any) => {
+      if (String(url).includes('/_apis/wit/workitems/1234')) {
+        return new Response(JSON.stringify({
+          id: 1234,
+          fields: { 'System.WorkItemType': 'Feature', 'System.Title': '支持叠加折扣', 'System.State': 'Active', 'System.Description': '<p>允许多个折扣叠加</p>' },
+          relations: [{ rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/p%2Frepo-guid%2F1' }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return origFetch(url, init);
+    }) as typeof fetch;
+
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: adoFetch });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+    const codexRun = async (_wt: string, prompt: string) => {
+      expect(prompt).toContain('实现影响面分析');
+      expect(prompt).toContain('支持叠加折扣');
+      expect(prompt).toContain('要怎么拆');
+      return { ok: true, output: '涉及 discount.js 与 checkout.js，建议先抽象折扣策略接口……' };
+    };
+    const pipeline = new Pipeline({ config, db, ado: adoClient, workspace, notify, logger: silentLogger, codexRun, rc });
+
+    await pipeline.runWorkItemDiscussion({ workItemId: 1234, extraQuestion: '要怎么拆？', userName: 'lus', roomId: 'room1', tmid: 'msg-1' });
+
+    expect(rcCalls.some((c) => c.url.includes('createDiscussion') && c.body.t_name.includes('WI#1234'))).toBe(true);
+    const discPosts = rcCalls.filter((c) => c.url.includes('postMessage') && c.body.roomId === 'disc-wi');
+    const allText = discPosts.map((c) => c.body.text).join('\n');
+    expect(allText).toContain('[Feature] 支持叠加折扣');
+    expect(allText).toContain('未解决意见 1 条、含必修 1');
+    expect(allText).toContain('折扣策略接口');
+    const update = rcCalls.filter((c) => c.url.includes('chat.update')).at(-1);
+    expect(update!.body.text).toContain('已创建讨论');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
   it('长期记忆闭环：review 沉淀 → 注入下次 review → dream 整理重写', async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-mem-'));
     const config = {

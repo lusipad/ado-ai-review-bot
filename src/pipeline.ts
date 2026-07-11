@@ -151,6 +151,16 @@ export interface ChatQaJob {
 const DISCUSSION_THRESHOLD = 1500;
 const RC_MSG_CHUNK = 4200;
 
+export interface WorkItemDiscussionJob {
+  workItemId: number;
+  extraQuestion?: string;
+  userName: string;
+  roomId: string;
+  tmid?: string;
+  /** 无关联 PR 时的仓库兜底（频道绑定/唯一仓库） */
+  fallbackRepoKey?: string;
+}
+
 /**
  * 多模型 findings 合并：指纹相同，或同文件近邻行号（±2）且同严重度，视为同一问题；
  * agreedBy 记录独立命中的模型数。resolvedThreadIds 取交集（错关线程比漏关更糟），
@@ -790,6 +800,104 @@ export class Pipeline {
         .catch(() => undefined);
     } finally {
       if (worktree) await workspace.removeWorktree(rKey, worktree);
+    }
+  }
+
+  /**
+   * 工作项讨论组：拉工作项与关联 PR → 创建 RC 讨论 → 贴工作项卡片与 PR review 状态 →
+   * agent 在关联仓库做实现影响面分析贴入。
+   */
+  async runWorkItemDiscussion(job: WorkItemDiscussionJob): Promise<void> {
+    const rc = this.rc;
+    if (!rc) return;
+    const { config, db, ado, workspace, logger } = this.deps;
+    const startedAt = Date.now();
+    const placeholder = await rc.postMessage(job.roomId, '📋 正在拉取工作项并分析…', job.tmid);
+    let worktree: string | undefined;
+    let rKey: string | undefined;
+    try {
+      const wi = await ado.getWorkItemDetail(job.workItemId);
+
+      // 关联 PR 详情 + bot 已知的 review 状态
+      const prCards: string[] = [];
+      for (const link of wi.prLinks.slice(0, 3)) {
+        try {
+          const prRes = await ado.getPullRequestById(link.repoId, link.pullRequestId);
+          const pr = parsePrResource(prRes, config.adoUrl);
+          const prKey = toPrKey(pr);
+          rKey = rKey ?? toRepoKey(pr);
+          const open = db.listOpenFindings(prKey);
+          const mustFix = open.filter((f) => f.severity === 'must-fix').length;
+          prCards.push(
+            `- [PR #${pr.pullRequestId}](${ado.prWebUrl(pr)}) ${pr.title}（${pr.status}${
+              open.length ? `，未解决意见 ${open.length} 条${mustFix ? `、含必修 ${mustFix}` : ''}` : ''
+            }）`,
+          );
+        } catch {
+          prCards.push(`- PR #${link.pullRequestId}（详情获取失败）`);
+        }
+      }
+      rKey = rKey ?? job.fallbackRepoKey;
+
+      const title = `WI#${wi.id} ${wi.title}`.slice(0, 90);
+      const d = await rc.createDiscussion(job.roomId, title);
+      const card = [
+        `**#${wi.id} [${wi.type}] ${wi.title}**`,
+        `状态：${wi.state}${wi.assignedTo ? ` · 负责人：${wi.assignedTo}` : ''}`,
+        wi.description ? `\n${truncateUtf8Bytes(wi.description, 2000, '…')}` : '（无描述）',
+        prCards.length ? `\n**关联 PR**\n${prCards.join('\n')}` : '\n（暂无关联 PR）',
+      ].join('\n');
+      await rc.postMessage(d.roomId, card);
+
+      // 影响面分析（有可定位的仓库才做）
+      if (rKey) {
+        const [project, repoName] = rKey.split('/');
+        const remoteUrl = `${config.adoUrl}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repoName)}`;
+        await workspace.ensureMirror(rKey, remoteUrl);
+        worktree = await workspace.createWorktree(rKey, await workspace.headCommit(rKey), `wi-${wi.id}-${Date.now()}`);
+        const conf = this.effectiveRepoConfig(rKey, worktree);
+        const prompt = renderTemplate(loadPrompt(config.promptsDir, 'workitem-analysis.md'), {
+          repo_key: rKey,
+          persona: conf.persona,
+          repo_map: this.repoMapFor(rKey, conf),
+          repo_memories: this.repoMemoriesFor(rKey, conf),
+          wi_id: String(wi.id),
+          wi_type: wi.type,
+          wi_title: wi.title,
+          wi_state: wi.state,
+          wi_description: wi.description || '（无描述）',
+          extra_question: job.extraQuestion || '（无）',
+        });
+        const result = await this.codexRunWithRetry(worktree, prompt);
+        if (result.ok) {
+          const analysis = result.output.trim();
+          for (let i = 0; i < analysis.length; i += RC_MSG_CHUNK) {
+            await rc.postMessage(d.roomId, analysis.slice(i, i + RC_MSG_CHUNK));
+          }
+        } else {
+          await rc.postMessage(d.roomId, `⚠️ 影响面分析失败：${(result.error ?? '').slice(0, 200)}`);
+        }
+      } else {
+        await rc.postMessage(d.roomId, '（工作项没有关联 PR、也无法从频道定位仓库，跳过代码影响面分析——可在问题里带上仓库名重试）');
+      }
+
+      await rc.updateMessage(job.roomId, placeholder.msgId, `✅ 已创建讨论「${title}」，工作项卡片与影响面分析在内。`);
+      db.insertReviewRun({
+        prKey: `wi:${wi.id}`,
+        repoKey: rKey ?? '',
+        kind: 'qa',
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+      });
+      logger.info({ workItemId: wi.id, rKey }, '工作项讨论组已创建');
+    } catch (err) {
+      logger.error({ workItemId: job.workItemId, err: String(err) }, '工作项讨论组失败');
+      await rc
+        .updateMessage(job.roomId, placeholder.msgId, `⚠️ 失败：${String(err).slice(0, 300)}（确认工作项 #${job.workItemId} 存在且 PAT 有工作项读取权限）`)
+        .catch(() => undefined);
+    } finally {
+      if (worktree && rKey) await workspace.removeWorktree(rKey, worktree);
     }
   }
 

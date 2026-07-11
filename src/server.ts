@@ -104,6 +104,27 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.status(200).send({ text: handleChatCommand(text, chatDeps) });
       }
 
+      // 工作项讨论组：拉工作项+关联 PR → 建讨论 → 影响面分析
+      const wiMatch = /^(工作项|workitem|wi)\s+#?(\d+)\s*([\s\S]*)$/i.exec(text);
+      if (wiMatch && deps.pipeline.chatQaAvailable() && body.channel_id) {
+        const fallback = resolveRepoForChat(
+          text,
+          body.channel_name,
+          deps.db.listKnownRepoKeys(),
+          config.channelRepos ?? {},
+        ).repoKey;
+        const job = {
+          workItemId: Number(wiMatch[2]),
+          extraQuestion: wiMatch[3].trim() || undefined,
+          userName: body.user_name ?? '群友',
+          roomId: body.channel_id,
+          tmid: body.message_id,
+          fallbackRepoKey: fallback,
+        };
+        deps.scheduler.enqueueQa(() => deps.pipeline.runWorkItemDiscussion(job));
+        return reply.status(200).send({});
+      }
+
       // 自由问答：需要 RC REST 身份（占位、线程回复、讨论），异步跑 agent
       if (deps.pipeline.chatQaAvailable() && body.channel_id) {
         const forceDiscussion = /^(讨论|discuss)\s+/i.test(text);

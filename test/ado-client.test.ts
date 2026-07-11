@@ -147,6 +147,33 @@ describe('AdoClient', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('getWorkItemDetail：字段 + ArtifactLink 关联 PR 解析', async () => {
+    const { calls, fetchFn } = mockFetch([
+      {
+        json: {
+          id: 42,
+          fields: {
+            'System.WorkItemType': 'Bug',
+            'System.Title': '折扣算错',
+            'System.State': 'Active',
+            'System.AssignedTo': { displayName: '张三' },
+            'System.Description': '<p>九五折算错</p>',
+          },
+          relations: [
+            { rel: 'ArtifactLink', url: 'vstfs:///Git/PullRequestId/proj-guid%2Frepo-guid%2F7' },
+            { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'vstfs:///WorkItemTracking/WorkItem/43' },
+            { rel: 'ArtifactLink', url: 'vstfs:///Git/Commit/xxx' },
+          ],
+        },
+      },
+    ]);
+    const wi = await client(fetchFn).getWorkItemDetail(42);
+    expect(calls[0].url).toContain('/_apis/wit/workitems/42?$expand=relations');
+    expect(wi).toMatchObject({ id: 42, type: 'Bug', title: '折扣算错', state: 'Active', assignedTo: '张三' });
+    expect(wi.description).toBe('九五折算错');
+    expect(wi.prLinks).toEqual([{ projectId: 'proj-guid', repoId: 'repo-guid', pullRequestId: 7 }]);
+  });
+
   it('downloadAttachment：带 PAT 下载、相对路径解析、拒绝外部主机', async () => {
     const calls: Captured[] = [];
     const fetchFn = (async (url: any, init: any) => {

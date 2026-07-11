@@ -26,6 +26,7 @@ let pipeline: {
   runQa: ReturnType<typeof vi.fn>;
   runFix: ReturnType<typeof vi.fn>;
   runChatQa: ReturnType<typeof vi.fn>;
+  runWorkItemDiscussion: ReturnType<typeof vi.fn>;
   chatQaAvailable: ReturnType<typeof vi.fn>;
 };
 let adoMock: { getPullRequestById: ReturnType<typeof vi.fn> };
@@ -39,6 +40,7 @@ beforeEach(() => {
     runQa: vi.fn().mockResolvedValue(undefined),
     runFix: vi.fn().mockResolvedValue(undefined),
     runChatQa: vi.fn().mockResolvedValue(undefined),
+    runWorkItemDiscussion: vi.fn().mockResolvedValue(undefined),
     chatQaAvailable: vi.fn().mockReturnValue(true),
   };
   const config = {
@@ -318,6 +320,30 @@ describe('RocketChat 双向问答', () => {
       tmid: 'msg-7',
       userName: 'lus',
       question: '结算模块有没有并发风险？',
+    });
+  });
+
+  it('工作项命令 → runWorkItemDiscussion（带追加问题与兜底仓库）', async () => {
+    db.insertReviewRun({
+      prKey: 'P/R/1', repoKey: 'P/R', kind: 'full', ok: true, durationMs: 1,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    const res = await post({
+      token: 'rc-token',
+      text: '工作项 #1234 这个需求要怎么拆？',
+      channel_id: 'room-9',
+      channel_name: 'dev',
+      message_id: 'msg-3',
+      user_name: 'lus',
+    });
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(pipeline.runWorkItemDiscussion).toHaveBeenCalledTimes(1));
+    expect(pipeline.runWorkItemDiscussion.mock.calls[0][0]).toMatchObject({
+      workItemId: 1234,
+      extraQuestion: '这个需求要怎么拆？',
+      roomId: 'room-9',
+      tmid: 'msg-3',
+      fallbackRepoKey: 'P/R',
     });
   });
 
