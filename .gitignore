@@ -5,3 +5,4 @@ release/
 .env
 *.log
 bot-config.json
+.gstack/
