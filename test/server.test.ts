@@ -366,6 +366,29 @@ describe('RocketChat 双向问答', () => {
   });
 });
 
+describe('/status（公开只读）', () => {
+  it('无需任何凭据；不暴露错误详情文本', async () => {
+    db.insertReviewRun({
+      prKey: 'P/R/1', repoKey: 'P/R', kind: 'full', ok: false, durationMs: 500,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+      error: '内部路径 D:\\secret\\path 的报错',
+    });
+    const page = await app.inject({ method: 'GET', url: '/status' });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('AI Review Bot 状态');
+
+    const res = await app.inject({ method: 'GET', url: '/status.json?days=7' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.version).toBeTruthy();
+    expect(body.uptimeSec).toBeGreaterThanOrEqual(0);
+    expect(body.queue).toMatchObject({ running: 0 });
+    expect(body.recentRuns).toHaveLength(1);
+    expect(body.recentRuns[0].ok).toBe(false);
+    expect(JSON.stringify(body)).not.toContain('secret'); // 错误详情不外泄
+  });
+});
+
 describe('/stats', () => {
   it('无密钥 401；带密钥返回聚合统计', async () => {
     db.insertReviewRun({

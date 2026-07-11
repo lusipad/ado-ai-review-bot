@@ -66,8 +66,9 @@ PR 合并 / 放弃
 
 ## 管理与观测
 
-- 面板 `http://<bot>:<port>/admin`：概览卡片、队列、采纳率（含带病合并）、最近任务；
-- `GET /stats?days=30&repo=...`（`x-webhook-secret` 头鉴权）程序化取数；
+- **状态页 `http://<bot>:<port>/status`**：无需密码，任何人可看——bot 活着没、在忙哪个 PR、统计与采纳率（推荐放到团队 wiki/收藏夹）；
+- 管理面板 `/admin`（密码=WEBHOOK_SECRET）：完整任务历史与错误详情；
+- `GET /status.json`（公开）/ `GET /stats?days=30&repo=...`（鉴权）程序化取数；
 - 部署自检 `node dist/server.js --doctor`。
 
 ## FAQ

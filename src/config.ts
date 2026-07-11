@@ -70,6 +70,8 @@ export interface Config {
   persona: string;
   /** 优雅停机时等待在跑任务收尾的最长时间（毫秒） */
   shutdownGraceMs: number;
+  /** 公开只读状态页 /status（不含错误详情）；false 关闭 */
+  statusPage: boolean;
 
   maxInlineComments: number;
   maxChangedFiles: number;
@@ -193,6 +195,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudeExtraArgs: (env.CLAUDE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean),
     persona: env.PERSONA || DEFAULT_PERSONA,
     shutdownGraceMs: num(env, 'SHUTDOWN_GRACE_MS', 2 * 60 * 1000),
+    statusPage: env.STATUS_PAGE !== 'false',
 
     maxInlineComments: num(env, 'MAX_INLINE_COMMENTS', 10),
     maxChangedFiles: num(env, 'MAX_CHANGED_FILES', 50),

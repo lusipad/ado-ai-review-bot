@@ -149,9 +149,11 @@ npm start
 
 **收工。** 建一个测试 PR，一两分钟内就能看到 bot 的总评和行内评论；在评论里 `@ai-review-bot` 提问试试对话。完整的上线验收项见[验收清单](#上线验收清单)。
 
-## 管理面板
+## 状态页与管理面板
 
-浏览器打开 `http://<bot>:3000/admin`（弹出登录框：用户名任意，密码填 `WEBHOOK_SECRET`）：
+**公开状态页** `http://<bot>:3000/status`（**无需密码**，团队任何人可看）：服务健康与版本、运行时长、队列实况、概览统计、各仓库采纳率、最近任务结果——刻意不含错误详情等敏感信息。程序化访问用 `/status.json`；`STATUS_PAGE=false` 可整体关闭。
+
+**管理面板** `http://<bot>:3000/admin`（弹出登录框：用户名任意，密码填 `WEBHOOK_SECRET`）：
 
 - **概览卡片**：任务数、覆盖 PR、发布意见、必修数、拦截误报、失败数、平均耗时（1/7/30 天切换）；
 - **队列**：正在处理哪些 PR、排队/防抖/问答通道状态、是否停机排水中；
@@ -180,6 +182,7 @@ npm start
 | `HOST` / `PORT` | | `0.0.0.0` / `3000` | 监听地址 |
 | `DATA_DIR` | | `./data` | mirror / worktree / SQLite 目录 |
 | `SHUTDOWN_GRACE_MS` | | `120000` | 优雅停机等待在跑任务收尾的上限 |
+| `STATUS_PAGE` | | `true` | 公开只读状态页 `/status`（无鉴权、不含错误详情） |
 | `BOT_ACCOUNT_ID` | | 自动获取 | bot 账号 GUID，一般无需配置 |
 | `BOT_DISPLAY_NAME` | | `ai-review-bot` | @提及匹配用的显示名，需与 ADO 账号一致 |
 | `DEBOUNCE_MS` | | `180000` | push 防抖窗口（毫秒） |

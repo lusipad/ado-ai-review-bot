@@ -17,7 +17,7 @@ import { NotifyDispatcher } from './notify';
 import { prKey as toPrKey, type Logger } from './types';
 import { collectStats, formatWeeklyReport } from './stats';
 import { msUntilNextWeekly } from './util';
-import { ADMIN_HTML, buildOverview } from './admin';
+import { ADMIN_HTML, STATUS_HTML, buildOverview, buildStatus } from './admin';
 import {
   handleChatCommand,
   isStructuredCommand,
@@ -64,6 +64,18 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   const { config, db, scheduler, pipeline } = deps;
 
   app.get('/healthz', async () => ({ ok: true }));
+
+  // 公开只读状态页：团队成员无需密码即可看健康/队列/统计（错误详情仍在 /admin）
+  if (config.statusPage !== false) {
+    app.get('/status', async (_req, reply) =>
+      reply.type('text/html; charset=utf-8').send(STATUS_HTML),
+    );
+    app.get('/status.json', async (req) => {
+      const q = req.query as { days?: string };
+      const days = Math.min(90, Math.max(1, Number(q.days) || 7));
+      return buildStatus(deps.db, deps.scheduler, days);
+    });
+  }
 
   // 度量：与 webhook 相同的密钥鉴权（x-webhook-secret 头或 basic auth 密码）
   app.get('/stats', async (req, reply) => {
