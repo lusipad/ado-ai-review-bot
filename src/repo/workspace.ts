@@ -165,6 +165,11 @@ export class Workspace {
     );
   }
 
+  /** 某 commit 的完整提交信息（[skip review] 标记检查用） */
+  async commitMessage(repoKey: string, commitId: string): Promise<string> {
+    return this.git(['--git-dir', this.mirrorPath(repoKey), 'log', '-1', '--format=%B', commitId]);
+  }
+
   /** mirror 默认分支的 HEAD（自由问答 checkout 用） */
   async headCommit(repoKey: string): Promise<string> {
     return (await this.git(['--git-dir', this.mirrorPath(repoKey), 'rev-parse', 'HEAD'])).trim();

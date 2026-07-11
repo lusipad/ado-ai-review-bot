@@ -58,6 +58,7 @@ export type RouteAction =
   | { type: 'record_draft'; pr: PrInfo }
   | { type: 'qa'; pr: PrInfo; threadId: number; commentId: number; question: string }
   | { type: 'fix'; pr: PrInfo; threadId: number; commentId: number; instruction: string }
+  | { type: 'pr_closed'; pr: PrInfo; closedStatus: 'completed' | 'abandoned' }
   | { type: 'ignore'; reason: string };
 
 export interface PrInfo extends PrRef {
@@ -165,6 +166,10 @@ export function routeEvent(
 
     case EVENT_PR_UPDATED: {
       const pr = parsePrResource(event.resource as AdoPrResource, adoUrl);
+      // 合并/放弃 → 收尾归档（findings 置 stale、取消排队任务）
+      if (pr.status === 'completed' || pr.status === 'abandoned') {
+        return { type: 'pr_closed', pr, closedStatus: pr.status };
+      }
       if (pr.status !== 'active') return { type: 'ignore', reason: `PR 状态 ${pr.status}` };
       const prior = ctx.priorState;
 

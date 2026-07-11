@@ -71,6 +71,16 @@ describe('routeEvent: git.pullrequest.updated', () => {
     expect(action.type).toBe('incremental_review');
   });
 
+  it('completed / abandoned → pr_closed 收尾动作', () => {
+    for (const status of ['completed', 'abandoned'] as const) {
+      const event = clone(updated());
+      (event.resource as { status: string }).status = status;
+      const action = routeEvent(event, ctx(), ADO_URL);
+      expect(action.type).toBe('pr_closed');
+      if (action.type === 'pr_closed') expect(action.closedStatus).toBe(status);
+    }
+  });
+
   it('源 commit 未变化（投票/reviewer 等触发的 updated）→ 忽略', () => {
     const action = routeEvent(
       updated(),

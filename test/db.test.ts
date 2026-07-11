@@ -183,6 +183,15 @@ describe('StateDb', () => {
   });
 });
 
+describe('detectEnvShadow', () => {
+  it('系统变量与 .env 不一致时报告；一致或未设不报', async () => {
+    const { detectEnvShadow } = await import('../src/doctor');
+    const file = 'ADO_PAT=newpat\nWEBHOOK_SECRET=s1\nEMPTY=\n';
+    expect(detectEnvShadow(file, { ADO_PAT: 'oldpat', WEBHOOK_SECRET: 's1' }, ['ADO_PAT', 'WEBHOOK_SECRET', 'EMPTY', 'MISSING']))
+      .toEqual(['ADO_PAT']);
+  });
+});
+
 describe('quietHours', () => {
   it('解析：合法/非法/边界', () => {
     expect(parseQuietHours('21-9')).toEqual({ start: 21, end: 9 });

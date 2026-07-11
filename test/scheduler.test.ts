@@ -173,6 +173,29 @@ describe('Scheduler task lane（/fix 等不可合并任务）', () => {
   });
 });
 
+describe('Scheduler cancelPending（PR 关闭收尾）', () => {
+  it('清掉该 PR 的待执行任务与防抖，别的 PR 不受影响', async () => {
+    const s = new Scheduler({ reviewConcurrency: 1, qaConcurrency: 1, debounceMs: 60_000, logger: silentLogger });
+    const gate = deferred();
+    const runs: string[] = [];
+    s.enqueueReview('pr-busy', 'full', async () => gate.promise); // 占住槽位
+    await tick();
+    s.enqueueReview('pr-1', 'full', async () => { runs.push('pr-1'); });
+    s.enqueueTask('pr-1', async () => { runs.push('pr-1-task'); });
+    s.enqueueReview('pr-2', 'full', async () => { runs.push('pr-2'); });
+    s.debouncePush('pr-1', () => runs.push('pr-1-debounce'));
+
+    s.cancelPending('pr-1');
+    expect(s.stats().pending).toBe(1); // 只剩 pr-2
+    expect(s.stats().debouncing).toBe(0);
+
+    gate.resolve();
+    await tick();
+    await tick();
+    expect(runs).toEqual(['pr-2']);
+  });
+});
+
 describe('Scheduler drain（优雅停机）', () => {
   it('等待在跑任务收尾，期间丢弃新任务，清空防抖', async () => {
     const s = new Scheduler({ reviewConcurrency: 2, qaConcurrency: 1, debounceMs: 60_000, logger: silentLogger });

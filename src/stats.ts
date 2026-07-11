@@ -42,7 +42,8 @@ export function formatWeeklyReport(stats: StatsReport): string {
     lines.push('**各仓库意见采纳率**（已裁决部分）');
     for (const r of stats.acceptanceByRepo.slice(0, 10)) {
       const rate = r.acceptanceRate === null ? '—' : `${Math.round(r.acceptanceRate * 100)}%`;
-      lines.push(`- ${r.repoKey}：${rate}（采纳 ${r.accepted} / 拒绝 ${r.rejected} / 待处理 ${r.open}）`);
+      const stale = r.stale > 0 ? ` / ⚠️ 带病合并 ${r.stale}` : '';
+      lines.push(`- ${r.repoKey}：${rate}（采纳 ${r.accepted} / 拒绝 ${r.rejected} / 待处理 ${r.open}${stale}）`);
     }
   }
   return lines.join('\n');

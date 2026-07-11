@@ -33,6 +33,8 @@ const SEVERITY_LABEL: Record<Severity, string> = {
 const MAX_DIFF_BYTES = 300_000;
 /** 注入提示词的历史被拒意见条数上限 */
 const MAX_REJECTED_FEEDBACK = 15;
+/** 跳过自动 review 的标记（PR 标题或 HEAD commit message 中），仿 CI 的 [skip ci] 惯例 */
+const SKIP_REVIEW_MARK = /\[skip[ -]review\]|\[review[ -]skip\]/i;
 /** 自动收紧：nit 级 finding 已裁决数达到该值且采纳率低于阈值 → 该仓库不再上报 nit */
 const TIGHTEN_MIN_RESOLVED = 8;
 const TIGHTEN_ACCEPT_RATE = 0.25;
@@ -286,6 +288,24 @@ export class Pipeline {
     if (!repoConf.autoReview && !manual) {
       logger.info({ key }, '跳过：该仓库已关闭自动 review');
       return;
+    }
+
+    // [skip review] 标记（PR 标题或 HEAD 提交信息）：跳过自动 review，手动 /review 不受限
+    if (!manual) {
+      const headMsg = await workspace.commitMessage(rKey, pr.sourceCommit).catch(() => '');
+      const marked = SKIP_REVIEW_MARK.test(pr.title) || SKIP_REVIEW_MARK.test(headMsg);
+      if (marked) {
+        logger.info({ key, kind }, '跳过：[skip review] 标记');
+        db.upsertPrState(key, {
+          isDraft: false,
+          lastReviewedCommit: pr.sourceCommit,
+          lastSourceCommit: pr.sourceCommit,
+        });
+        await ado
+          .setPrStatus(pr, { state: 'succeeded', description: '按 [skip review] 标记跳过（评论 /review 可强制评审）' })
+          .catch(() => undefined);
+        return;
+      }
     }
 
     logger.info({ key, kind, reason }, '开始 review');

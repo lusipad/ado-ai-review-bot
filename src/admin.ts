@@ -72,7 +72,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
   <h2>各仓库意见采纳率（已裁决部分）</h2>
   <div class="tablebox"><table id="acceptance">
-    <thead><tr><th>仓库</th><th>意见总数</th><th>采纳</th><th>拒绝</th><th>待处理</th><th>采纳率</th></tr></thead>
+    <thead><tr><th>仓库</th><th>意见总数</th><th>采纳</th><th>拒绝</th><th>待处理</th><th>带病合并</th><th>采纳率</th></tr></thead>
     <tbody></tbody></table></div>
 
   <h2>最近任务</h2>
@@ -115,9 +115,9 @@ async function load() {
 
   document.querySelector('#acceptance tbody').innerHTML = d.stats.acceptanceByRepo.map(r =>
     '<tr><td>' + esc(r.repoKey) + '</td><td>' + r.total + '</td><td class="ok">' + r.accepted +
-    '</td><td class="bad">' + r.rejected + '</td><td>' + r.open + '</td><td>' +
+    '</td><td class="bad">' + r.rejected + '</td><td>' + r.open + '</td><td class="' + (r.stale > 0 ? 'bad' : '') + '">' + (r.stale ?? 0) + '</td><td>' +
     (r.acceptanceRate === null ? '—' : Math.round(r.acceptanceRate * 100) + '%') + '</td></tr>').join('') ||
-    '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+    '<tr><td colspan="7" class="muted">暂无数据</td></tr>';
 
   document.querySelector('#runs tbody').innerHTML = d.recentRuns.map(r =>
     '<tr><td>' + fmtTime(r.createdAt) + '</td><td>' + esc(r.prKey) + '</td><td>' + (KIND[r.kind] || esc(r.kind)) +

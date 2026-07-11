@@ -189,6 +189,23 @@ describe('webhook 接收器', () => {
     expect(health.statusCode).toBe(200);
   });
 
+  it('PR 合并 → open findings 归档为 stale，基线对齐', async () => {
+    const key = 'Fabrikam/Fabrikam/1';
+    db.insertFinding({
+      prKey: key, repoKey: 'Fabrikam/Fabrikam',
+      fingerprint: 'fp-x', threadId: 9, severity: 'must-fix', file: 'a.ts', title: '未修的问题', line: 1,
+    });
+    const payload = loadFixture('pr-updated-push.json');
+    payload.resource.status = 'completed';
+    const res = await inject(payload);
+    expect(res.json().action).toBe('pr_closed');
+    expect(db.listOpenFindings(key)).toHaveLength(0);
+    const acc = db.acceptanceByRepo('2000-01-01 00:00:00').find((r) => r.repoKey === 'Fabrikam/Fabrikam');
+    expect(acc?.stale).toBe(1);
+    // 基线对齐 → 恢复扫描不会再入队
+    expect(db.listPrStatesNeedingReview().map((s) => s.prKey)).not.toContain(key);
+  });
+
   it('草稿转正式（updated 且旧状态 isDraft=true）→ 全量 review', async () => {
     db.upsertPrState('Fabrikam/Fabrikam/1', { isDraft: true, lastSourceCommit: 'aaaa0000bbbb1111cccc2222dddd3333eeee4444' });
     const res = await inject(loadFixture('pr-updated-push.json'));

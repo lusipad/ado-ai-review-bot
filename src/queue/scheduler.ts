@@ -101,6 +101,17 @@ export class Scheduler {
     this.dispatchReviews();
   }
 
+  /** PR 关闭收尾：取消该 PR 的防抖与所有待执行任务（在跑的不打断，自然收尾） */
+  cancelPending(prKey: string): void {
+    this.cancelDebounce(prKey);
+    for (const [jobId, job] of this.pending) {
+      if (job.serialKey === prKey) {
+        this.pending.delete(jobId);
+        this.order = this.order.filter((id) => id !== jobId);
+      }
+    }
+  }
+
   /** push 防抖：窗口内重复调用只重置定时器，窗口结束才真正入队 */
   debouncePush(prKey: string, fire: () => void): void {
     this.cancelDebounce(prKey);

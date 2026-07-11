@@ -24,6 +24,7 @@ import {
   resolveRepoForChat,
   type RocketChatOutgoing,
 } from './chatops';
+import { runDoctor } from './doctor';
 import { KnowledgeStore } from './knowledge';
 
 export interface AppDeps {
@@ -254,6 +255,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         );
         break;
       }
+      case 'pr_closed': {
+        const pr = action.pr;
+        const key = toPrKey(pr);
+        scheduler.cancelPending(key);
+        const stale = db.markPrFindingsStale(key);
+        // 基线对齐：防止启动恢复扫描把已关闭的 PR 重新入队
+        db.upsertPrState(key, { isDraft: false, lastReviewedCommit: pr.sourceCommit, lastSourceCommit: pr.sourceCommit });
+        req.log.info({ key, closedStatus: action.closedStatus, staleFindings: stale }, 'PR 已关闭，收尾归档');
+        break;
+      }
       case 'ignore':
         break;
     }
@@ -396,6 +407,15 @@ export function scheduleWeeklyReport(deps: AppDeps, logger: Logger): void {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--doctor')) {
+    let ok = false;
+    try {
+      ok = await runDoctor(loadConfig());
+    } catch (err) {
+      console.log(`❌ 配置加载失败 — ${String(err)}`);
+    }
+    process.exit(ok ? 0 : 1);
+  }
   const config = loadConfig();
   const { app, deps } = createApp(config);
   // BOT_ACCOUNT_ID 未配置时自动获取：PAT 属于 bot 服务账号，connectionData 返回的就是它的 identity

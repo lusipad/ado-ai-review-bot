@@ -22,8 +22,11 @@ export interface FindingRow {
   repoKey: string;
   fingerprint: string;
   threadId: number;
-  /** open=未处理；fixed=已修复（bot 判定或人工 resolve）；wontfix=被团队拒绝；closed=其他关闭 */
-  status: 'open' | 'fixed' | 'wontfix' | 'closed';
+  /**
+   * open=未处理；fixed=已修复（bot 判定或人工 resolve）；wontfix=被团队拒绝；
+   * closed=其他关闭；stale=PR 合并/放弃时仍未处理（带病合并，单独统计）
+   */
+  status: 'open' | 'fixed' | 'wontfix' | 'closed' | 'stale';
   severity: Severity;
   file: string;
   title: string;
@@ -52,6 +55,8 @@ export interface RepoAcceptance {
   accepted: number;
   rejected: number;
   open: number;
+  /** PR 合并/放弃时仍未处理的（带病合并） */
+  stale: number;
 }
 
 export interface StatsOverview {
@@ -234,6 +239,14 @@ export class StateDb {
       .run(prKey, threadId);
   }
 
+  /** PR 合并/放弃收尾：仍 open 的 finding 归档为 stale（带病合并指标），返回归档条数 */
+  markPrFindingsStale(prKey: string): number {
+    const r = this.db
+      .prepare("UPDATE findings SET status = 'stale' WHERE pr_key = ? AND status = 'open'")
+      .run(prKey);
+    return r.changes;
+  }
+
   /** 线程反馈同步：仅允许 open → 终态（人工改回 active 的场景由下次同步重新判定） */
   updateFindingFeedback(
     prKey: string,
@@ -383,7 +396,8 @@ export class StateDb {
                   COUNT(*) AS total,
                   SUM(CASE WHEN status IN ('fixed','closed') THEN 1 ELSE 0 END) AS accepted,
                   SUM(CASE WHEN status = 'wontfix' THEN 1 ELSE 0 END) AS rejected,
-                  SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open
+                  SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open,
+                  SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END) AS stale
            FROM findings WHERE created_at >= ? GROUP BY repo_key ORDER BY total DESC`,
         )
         .all(sinceUtc) as Record<string, unknown>[]
@@ -393,6 +407,7 @@ export class StateDb {
       accepted: (r.accepted as number) ?? 0,
       rejected: (r.rejected as number) ?? 0,
       open: (r.open as number) ?? 0,
+      stale: (r.stale as number) ?? 0,
     }));
   }
 

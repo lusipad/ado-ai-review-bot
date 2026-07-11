@@ -742,6 +742,53 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }, 60_000);
 
+  it('[skip review] 标记：标题或 HEAD 提交信息命中则跳过自动 review，手动不受限', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-skip-'));
+    const config = makeConfig(dataDir);
+    git(originDir, 'checkout', '-b', 'skip-branch', 'main', '-q');
+    fs.appendFileSync(path.join(originDir, 'app.ts'), '// wip\n');
+    git(originDir, 'add', '.');
+    git(originDir, 'commit', '-m', 'wip: 中间态 [skip review]', '-q');
+    const skipHead = git(originDir, 'rev-parse', 'HEAD');
+    git(originDir, 'checkout', 'main', '-q');
+    const pr: PrInfo = { ...prInfo(skipHead, undefined), pullRequestId: 66, sourceRefName: 'refs/heads/skip-branch' };
+    const ado = makeMockAdo(() => prResourceOf(pr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+    let codexCalls = 0;
+    const pipeline = new Pipeline({
+      config, db, ado: adoClient, workspace, notify, logger: silentLogger,
+      codexRun: async () => { codexCalls++; return { ok: true, output: JSON.stringify({ summary: 'ok', findings: [], resolvedThreadIds: [] }) }; },
+    });
+
+    // 提交信息带标记 → 自动 review 跳过
+    await pipeline.runFullReview(pr, 'PR 创建');
+    expect(codexCalls).toBe(0);
+    expect(ado.calls.filter((c) => c.url.includes('/statuses?')).at(-1)?.body.description).toContain('[skip review]');
+    expect(db.getPrState('Proj/Repo/66')?.lastReviewedCommit).toBe(skipHead);
+
+    // 手动 /review 无视标记
+    await pipeline.runFullReview(pr, '/review 命令', true);
+    expect(codexCalls).toBe(1);
+
+    // 标题带标记同样生效
+    const pr2 = { ...pr, title: '改造 add 函数 [skip-review]', sourceCommit: featureHead, mergeCommit: mergeHead, pullRequestId: 67 };
+    const ado2 = makeMockAdo(() => prResourceOf(pr2));
+    const pipeline2 = new Pipeline({
+      config, db, ado: new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado2.fetchFn }),
+      workspace, notify, logger: silentLogger,
+      codexRun: async () => { codexCalls++; return { ok: true, output: '{}' }; },
+    });
+    await pipeline2.runFullReview(pr2, 'PR 创建');
+    expect(codexCalls).toBe(1); // 没增加
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
   it('触发筛选：变更全是图片/lockfile 时跳过 review，基线照常推进', async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-filter-'));
     const config = makeConfig(dataDir);
