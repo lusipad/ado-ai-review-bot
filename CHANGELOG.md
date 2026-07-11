@@ -2,6 +2,16 @@
 
 完整发布说明见 [GitHub Releases](https://github.com/lusipad/ado-ai-review-bot/releases)。
 
+## v0.4.0（2026-07-11）
+
+**RocketChat 深度集成**：`@bot` 自由提问——进代码库分析后**在提问线程里**回答（知识库+记忆注入）；长答案自动创建**讨论组**；`工作项 <id>` 为 ADO 工作项建需求讨论组（卡片 + 关联 PR review 状态 + 实现影响面分析）；must-fix 通知 @ 责任人。
+
+**Web 门户**：`/` 多 tab 公开只读站点（无需密码）——状态、记忆与知识（按仓库看地图与记忆）、使用手册与示例在线阅读（部署即自带 wiki）；按设计系统重做视觉（明暗双主题、meter 采纳率、状态点）。`/admin` 保持鉴权。
+
+**工作流**：通知静默时段（`QUIET_HOURS=21-9`，积压后按仓库汇总）；变更类型触发筛选（图片/lockfile/忽略路径全命中直接跳过不烧模型）；PR 合并/放弃自动归档遗留意见为「带病合并」指标；`[skip review]` 标记；`--doctor` 部署自检（8 项实测检查）。
+
+**文档**：docs/usage.md 开发者手册 + docs/examples.md 真实输出示例集；Claude 引擎放行 Skill 工具（项目 .claude/skills 原生可调用）。
+
 ## v0.3.0（2026-07-11）
 
 **Claude Code 双引擎**：`claude -p` 无头模式接入为第二种 agent 引擎——profile 支持 `engine:name` 格式（`claude`、`claude:opus`、`codex:deepseek`），可与 codex **交叉 review 同一个 PR**（不同 agent 架构的独立验证）；`REVIEW_ENGINE` 可整体切换默认引擎。安全映射：评审/问答限只读工具白名单，`/fix` 允许编辑但不放开任意 Bash；贴图提问自动转 Read 工具读取。
