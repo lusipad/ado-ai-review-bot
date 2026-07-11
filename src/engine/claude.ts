@@ -26,6 +26,9 @@ const READ_TOOLS = [
   'Read',
   'Glob',
   'Grep',
+  // 项目技能：bot 在 worktree 里工作，.claude/skills/ 会被 Claude Code 原生发现，
+  // 放开 Skill 工具才能调用（技能内的动作仍受本白名单约束）
+  'Skill',
   'Bash(git log:*)',
   'Bash(git show:*)',
   'Bash(git blame:*)',

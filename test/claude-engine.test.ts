@@ -3,10 +3,11 @@ import { buildClaudeArgs, buildClaudePrompt, parseClaudeJson } from '../src/engi
 import { parseEngineProfile } from '../src/pipeline';
 
 describe('buildClaudeArgs', () => {
-  it('只读模式：headless JSON + 只读工具白名单，无任意 Bash', () => {
+  it('只读模式：headless JSON + 只读工具白名单（含 Skill），无任意 Bash', () => {
     const args = buildClaudeArgs({ sandbox: 'read-only', extraArgs: [] });
     expect(args.slice(0, 3)).toEqual(['-p', '--output-format', 'json']);
     expect(args).toContain('Read');
+    expect(args).toContain('Skill'); // 项目 .claude/skills 原生可用
     expect(args).toContain('Bash(git log:*)');
     expect(args).not.toContain('Edit');
     expect(args.some((a) => a === 'Bash' || a === 'Bash(*)')).toBe(false);

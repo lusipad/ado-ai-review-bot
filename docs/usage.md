@@ -81,5 +81,8 @@ PR 合并 / 放弃
 **Q：让 bot 只看重点、别碰某些目录？**
 `.ai-review.yml`：`ignorePaths` 排除路径、`focus` 指定侧重点、`minSeverity` 提高门槛、`persona` 换语气。
 
+**Q：想改 bot 的提示词 / 让它用项目里的 SKILL？**
+提示词分四层：`prompts/*.md` 模板本体（**改完即生效，无需重启**）、`PERSONA` 风格卡、`.ai-review.yml` 的 `focus`、`prompts/checklists/` 语言清单。项目内资产则天然生效——bot 在你代码的 worktree 里跑 agent：`AGENTS.md` 两个引擎都原生遵循；`.claude/skills/` 项目技能 Claude 引擎原生可调用，codex 引擎在 AGENTS.md 里指个路（「技能文档见 .claude/skills/」）即可。
+
 **Q：review 太慢/太贵？**
 增量机制已保证只审新变更；再省就用 `[skip review]`、调低 `REVIEW_PROFILES` 到单模型、`CODEX_EXTRA_ARGS=-c model_reasoning_effort=medium`。
