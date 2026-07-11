@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { StateDb } from '../src/state/db';
-import { extractImageUrls, findingFingerprint, msUntilNextWeekly } from '../src/util';
+import { extractImageUrls, findingFingerprint, inQuietHours, msUntilNextWeekly, msUntilQuietEnd, parseQuietHours } from '../src/util';
 
 let tmpDir: string;
 
@@ -180,6 +180,31 @@ describe('StateDb', () => {
     expect(open).toHaveLength(1);
     expect(open[0].repoKey).toBe('Proj/Repo');
     db.close();
+  });
+});
+
+describe('quietHours', () => {
+  it('解析：合法/非法/边界', () => {
+    expect(parseQuietHours('21-9')).toEqual({ start: 21, end: 9 });
+    expect(parseQuietHours('22 - 08')).toEqual({ start: 22, end: 8 });
+    expect(parseQuietHours('9-9')).toBeUndefined();
+    expect(parseQuietHours('25-9')).toBeUndefined();
+    expect(parseQuietHours('')).toBeUndefined();
+    expect(parseQuietHours(undefined)).toBeUndefined();
+  });
+
+  it('跨午夜判定与结束时刻', () => {
+    const q = { start: 21, end: 9 };
+    expect(inQuietHours(new Date(2026, 6, 11, 22, 0), q)).toBe(true);
+    expect(inQuietHours(new Date(2026, 6, 11, 3, 0), q)).toBe(true);
+    expect(inQuietHours(new Date(2026, 6, 11, 9, 0), q)).toBe(false);
+    expect(inQuietHours(new Date(2026, 6, 11, 12, 0), q)).toBe(false);
+    // 23:00 → 次日 09:00 = 10 小时
+    expect(msUntilQuietEnd(new Date(2026, 6, 11, 23, 0), q)).toBe(10 * 3600_000);
+    // 白天时段（9-17）判定
+    const day = { start: 9, end: 17 };
+    expect(inQuietHours(new Date(2026, 6, 11, 12, 0), day)).toBe(true);
+    expect(inQuietHours(new Date(2026, 6, 11, 18, 0), day)).toBe(false);
   });
 });
 

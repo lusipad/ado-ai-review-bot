@@ -204,6 +204,8 @@ npm start
 | `ROCKETCHAT_URL` / `ROCKETCHAT_BOT_USER_ID` / `ROCKETCHAT_BOT_TOKEN` | | — | RC REST 身份（自由问答/线程/讨论；三项齐全才启用） |
 | `WECOM_WEBHOOK_KEY` | | — | 企业微信群机器人 key |
 | `NOTIFY_EVENTS` | | 全部 | `review_completed,must_fix_found,job_failed,weekly_report` |
+| `QUIET_HOURS` | | 关 | 通知静默时段（如 `21-9`）：期间积压、结束时按仓库汇总发出 |
+| `REVIEW_IGNORE_EXTENSIONS` / `REVIEW_IGNORE_FILENAMES` | | 内置清单 | 触发筛选：图片/二进制/lockfile 等变更不触发 review，全命中直接跳过 |
 
 ## Review 行为定制
 
@@ -226,6 +228,8 @@ ignorePaths:              # 忽略的路径（glob）
   - "**/*.generated.cs"
 focus: 重点关注线程安全和数据库事务边界。   # 追加进提示词
 ```
+
+> 触发筛选有三层：全局扩展名清单（图片/二进制等，`REVIEW_IGNORE_EXTENSIONS`）、全局文件名清单（lockfile，`REVIEW_IGNORE_FILENAMES`）、仓库级 `ignorePaths`。PR 的变更**全部**命中时整个 review 直接跳过（不烧模型），PR status 会注明。
 
 仓库根目录的 **`AGENTS.md`** 会被 codex 自动遵循，写团队编码约定最合适。
 
@@ -345,7 +349,8 @@ curl -H "x-webhook-secret: <WEBHOOK_SECRET>" "http://<bot>:3000/stats?days=7&rep
 
 - **RocketChat**：管理 → Integrations → New Incoming Webhook → URL 填入 `ROCKETCHAT_WEBHOOK_URL`；
 - **企业微信**：群 → 添加群机器人 → key（或完整 URL）填入 `WECOM_WEBHOOK_KEY`；
-- 两者可同时启用；`NOTIFY_EVENTS` 控制推送哪些事件；通知失败只记日志，不影响 review。
+- 两者可同时启用；`NOTIFY_EVENTS` 控制推送哪些事件；通知失败只记日志，不影响 review；
+- **静默时段**：`QUIET_HOURS=21-9` 后，晚上 push 触发的通知不会半夜 @ 人——积压到早上 9 点按仓库汇总成一条发出（review 照跑，结果始终在 PR 上）。
 
 **must-fix 通知 @ 责任人**（RocketChat）：在 `BOT_CONFIG_FILE` 指向的 JSON 里配 ADO 账号（uniqueName 或显示名）→ RC 用户名映射，发现必修问题时直接 @ PR 作者：
 

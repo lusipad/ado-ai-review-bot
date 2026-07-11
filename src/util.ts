@@ -47,6 +47,38 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+export interface QuietHours {
+  /** 开始小时（含），0-23 */
+  start: number;
+  /** 结束小时（不含），0-23 */
+  end: number;
+}
+
+/** 解析 "21-9" / "22-08" 这类静默时段配置；非法返回 undefined（= 不启用） */
+export function parseQuietHours(raw: string | undefined): QuietHours | undefined {
+  if (!raw) return undefined;
+  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec(raw.trim());
+  if (!m) return undefined;
+  const start = Number(m[1]);
+  const end = Number(m[2]);
+  if (start > 23 || end > 23 || start === end) return undefined;
+  return { start, end };
+}
+
+/** 当前是否处于静默时段（支持跨午夜，如 21-9） */
+export function inQuietHours(now: Date, q: QuietHours): boolean {
+  const h = now.getHours();
+  return q.start < q.end ? h >= q.start && h < q.end : h >= q.start || h < q.end;
+}
+
+/** 距静默时段结束的毫秒数（用于安排汇总发送） */
+export function msUntilQuietEnd(now: Date, q: QuietHours): number {
+  const end = new Date(now);
+  end.setHours(q.end, 0, 0, 0);
+  if (end.getTime() <= now.getTime()) end.setDate(end.getDate() + 1);
+  return end.getTime() - now.getTime();
+}
+
 /**
  * 距下一个「周 weekday 的 hour 点整」（服务器本地时区）的毫秒数。
  * weekday: 0=周日 … 6=周六。恰好落在时点上时返回一整周（避免重复触发）。

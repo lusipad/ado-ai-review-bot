@@ -23,6 +23,42 @@ const event: NotifyEvent = {
   url: 'https://ado.corp.local/DefaultCollection/Proj/_git/Repo/pullrequest/1',
 };
 
+describe('静默时段', () => {
+  const config = {
+    notify: { rocketchatWebhookUrl: 'https://chat.local/hooks/x', events: ['review_completed', 'must_fix_found', 'job_failed'] },
+    repoOverrides: {},
+    quietHours: { start: 21, end: 9 },
+  } as unknown as Config;
+
+  it('静默期入队不发送，flush 时按仓库汇总一条（含合并 @ 人）', async () => {
+    const sent: any[] = [];
+    const fetchFn = (async (_u: any, init: any) => { sent.push(JSON.parse(init.body)); return new Response('{}', { status: 200 }); }) as typeof fetch;
+    const d = new NotifyDispatcher(config, silentLogger, fetchFn, () => new Date(2026, 6, 11, 23, 30));
+
+    d.dispatch(event);
+    d.dispatch({ ...event, type: 'must_fix_found', title: '发现 2 个必修：PR-2', mentionUsernames: ['zhang.san'] });
+    d.dispatch({ ...event, repoKey: 'Other/Repo', title: '另一个仓库的通知' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(sent).toHaveLength(0); // 静默期不发
+
+    d.flushQuietQueue();
+    await vi.waitFor(() => expect(sent.length).toBe(2)); // 两个仓库各一条汇总
+    const all = JSON.stringify(sent);
+    expect(all).toContain('静默期间的 2 条通知汇总');
+    expect(all).toContain('@zhang.san');
+    expect(all).toContain('另一个仓库的通知');
+  });
+
+  it('非静默时段照常直发', async () => {
+    const sent: any[] = [];
+    const fetchFn = (async (_u: any, init: any) => { sent.push(JSON.parse(init.body)); return new Response('{}', { status: 200 }); }) as typeof fetch;
+    const d = new NotifyDispatcher(config, silentLogger, fetchFn, () => new Date(2026, 6, 11, 12, 0));
+    d.dispatch(event);
+    await vi.waitFor(() => expect(sent.length).toBe(1));
+    expect(sent[0].text).toContain('AI review 完成');
+  });
+});
+
 describe('RocketChatNotifier', () => {
   it('POST text 到 webhook URL', async () => {
     const cap: any = {};

@@ -326,6 +326,20 @@ export class Pipeline {
 
       const { diffText, changedFiles, degradedDiff } = await this.collectDiff(pr, rKey, kind, prior?.lastReviewedCommit, conf);
 
+      // 触发筛选：过滤后没有值得 review 的变更（纯图片/lockfile/忽略路径）→ 跳过，不烧模型
+      if (changedFiles.length === 0) {
+        logger.info({ key, kind }, '跳过：变更均为忽略类型（图片/lockfile/忽略路径）');
+        db.upsertPrState(key, {
+          isDraft: false,
+          lastReviewedCommit: pr.sourceCommit,
+          lastSourceCommit: pr.sourceCommit,
+        });
+        await ado
+          .setPrStatus(pr, { state: 'succeeded', description: '本次变更均为忽略类型（图片/依赖锁文件等），已跳过 AI review' })
+          .catch(() => undefined);
+        return;
+      }
+
       const openFindings = db.listOpenFindings(key);
       const rejected = db.listRejectedFindings(rKey, MAX_REJECTED_FEEDBACK);
       const template = loadPrompt(config.promptsDir, kind === 'full' ? 'review-full.md' : 'review-incremental.md');
@@ -458,7 +472,7 @@ export class Pipeline {
       raw = await workspace.prDiff(rKey, pr.targetCommit!, pr.sourceCommit!);
       files = await workspace.changedFiles(rKey, pr.targetCommit!, pr.sourceCommit!, true);
     }
-    files = files.filter((f) => !this.isIgnored(f, conf.ignorePaths));
+    files = files.filter((f) => !this.isFilteredFile(f, conf));
 
     let degraded = false;
     let diffText = raw;
@@ -1311,6 +1325,15 @@ export class Pipeline {
       persona: yamlConf.persona ?? override.persona ?? config.persona,
       autoTightened,
     };
+  }
+
+  /** 触发筛选：扩展名（图片/二进制）、文件名（lockfile）、路径 glob 三层，任一命中即不算需 review 的变更 */
+  private isFilteredFile(file: string, conf: EffectiveRepoConfig): boolean {
+    const { reviewIgnoreExtensions, reviewIgnoreFilenames } = this.deps.config;
+    const base = path.basename(file);
+    if (reviewIgnoreExtensions.includes(path.extname(file).toLowerCase())) return true;
+    if (reviewIgnoreFilenames.includes(base)) return true;
+    return this.isIgnored(file, conf.ignorePaths);
   }
 
   private isIgnored(file: string, patterns: string[]): boolean {

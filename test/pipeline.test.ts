@@ -8,7 +8,7 @@ import { StateDb } from '../src/state/db';
 import { Workspace } from '../src/repo/workspace';
 import { AdoClient } from '../src/ado/client';
 import { NotifyDispatcher } from '../src/notify';
-import type { Config } from '../src/config';
+import { DEFAULT_IGNORE_EXTENSIONS, DEFAULT_IGNORE_FILENAMES, type Config } from '../src/config';
 import type { PrInfo } from '../src/ado/events';
 
 const silentLogger = { info: () => {}, warn: () => {}, error: () => {} };
@@ -160,8 +160,11 @@ function makeConfig(dataDir: string): Config {
     claudeExtraArgs: [],
     shutdownGraceMs: 1000,
     userMap: {},
+    channelRepos: {},
     persona: '测试人格：直接了当，不打官腔。',
     dreamEnabled: false,
+    reviewIgnoreExtensions: DEFAULT_IGNORE_EXTENSIONS,
+    reviewIgnoreFilenames: DEFAULT_IGNORE_FILENAMES,
     maxInlineComments: 10,
     maxChangedFiles: 50,
     promptsDir: path.resolve(__dirname, '..', 'prompts'),
@@ -734,6 +737,40 @@ describe('Pipeline 端到端（本地 git + mock ADO + 假 codex）', () => {
     await pipeline2.runFix({ pr: pr2, threadId: 72, commentId: 1, instruction: '' });
     patch = ado.calls.filter((c) => c.method === 'PATCH' && /threads\/72/.test(c.url)).at(-1);
     expect(patch?.body.content).toContain('未开启 /fix');
+
+    db.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('触发筛选：变更全是图片/lockfile 时跳过 review，基线照常推进', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-review-filter-'));
+    const config = makeConfig(dataDir);
+    // 在独立分支上只提交图片和 lockfile
+    git(originDir, 'checkout', '-b', 'assets-only', 'main', '-q');
+    fs.writeFileSync(path.join(originDir, 'logo.png'), Buffer.from([137, 80, 78, 71]));
+    fs.writeFileSync(path.join(originDir, 'package-lock.json'), '{}');
+    git(originDir, 'add', '.');
+    git(originDir, 'commit', '-m', 'assets', '-q');
+    const assetsHead = git(originDir, 'rev-parse', 'HEAD');
+    git(originDir, 'checkout', 'main', '-q');
+    const pr: PrInfo = { ...prInfo(assetsHead, undefined), pullRequestId: 55, sourceRefName: 'refs/heads/assets-only' };
+    const ado = makeMockAdo(() => prResourceOf(pr));
+
+    const db = new StateDb(path.join(dataDir, 'state.db'));
+    const workspace = new Workspace({ dataDir, logger: silentLogger });
+    const adoClient = new AdoClient({ baseUrl: config.adoUrl, pat: 'pat', fetchFn: ado.fetchFn });
+    const notify = new NotifyDispatcher(config, silentLogger, (async () => new Response('{}')) as typeof fetch);
+    let codexCalls = 0;
+    const pipeline = new Pipeline({
+      config, db, ado: adoClient, workspace, notify, logger: silentLogger,
+      codexRun: async () => { codexCalls++; return { ok: true, output: '{}' }; },
+    });
+
+    await pipeline.runFullReview(pr, 'PR 创建');
+    expect(codexCalls).toBe(0); // 没烧模型
+    const status = ado.calls.filter((c) => c.url.includes('/statuses?')).at(-1);
+    expect(status?.body.description).toContain('已跳过');
+    expect(db.getPrState('Proj/Repo/55')?.lastReviewedCommit).toBe(assetsHead); // 基线推进
 
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });

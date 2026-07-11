@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Severity } from './types';
+import { parseQuietHours, type QuietHours } from './util';
 
 export interface NotifyConfig {
   rocketchatWebhookUrl?: string;
@@ -90,6 +91,11 @@ export interface Config {
   dreamEnabled: boolean;
 
   notify: NotifyConfig;
+  /** 通知静默时段（如 21-9）：期间通知积压，结束时汇总发出；review 本身照跑 */
+  quietHours?: QuietHours;
+  /** 触发筛选：这些扩展名/文件名的变更不算需要 review 的变更（全中则跳过 review） */
+  reviewIgnoreExtensions: string[];
+  reviewIgnoreFilenames: string[];
   /** RocketChat outgoing webhook 的 token（双向问答鉴权），不配则该端点关闭 */
   rocketchatOutgoingToken?: string;
   /** RC REST 身份（自由问答/线程/讨论需要）；三项齐全才启用 */
@@ -109,6 +115,21 @@ export const DEFAULT_PERSONA =
   '你是一位资深而友善的同事型评审者：指出问题时先说清楚在什么场景下会出什么事（给证据、给复现路径），' +
   '再给出具体改法；语气直接但不居高临下，不说教、不打官腔、不堆砌客套话；对事不对人，' +
   '认可作者合理的设计取舍。用自然的中文表达，能一句话说清的不展开长篇。';
+
+/** 默认不值得 review 的扩展名（图片/字体/二进制/媒体） */
+export const DEFAULT_IGNORE_EXTENSIONS = [
+  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp', '.bmp',
+  '.woff', '.woff2', '.ttf', '.eot', '.otf',
+  '.pdf', '.zip', '.7z', '.tar', '.gz', '.exe', '.dll', '.so', '.dylib', '.bin',
+  '.mp3', '.mp4', '.mov', '.avi',
+];
+
+/** 默认不值得 review 的文件名（各语言 lockfile） */
+export const DEFAULT_IGNORE_FILENAMES = [
+  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'npm-shrinkwrap.json',
+  'uv.lock', 'poetry.lock', 'Pipfile.lock',
+  'Cargo.lock', 'go.sum', 'composer.lock', 'Gemfile.lock', 'packages.lock.json',
+];
 
 function req(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -191,6 +212,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       wecomWebhookKey: env.WECOM_WEBHOOK_KEY || undefined,
       events,
     },
+    quietHours: parseQuietHours(env.QUIET_HOURS),
+    reviewIgnoreExtensions: env.REVIEW_IGNORE_EXTENSIONS
+      ? env.REVIEW_IGNORE_EXTENSIONS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+      : DEFAULT_IGNORE_EXTENSIONS,
+    reviewIgnoreFilenames: env.REVIEW_IGNORE_FILENAMES
+      ? env.REVIEW_IGNORE_FILENAMES.split(',').map((s) => s.trim()).filter(Boolean)
+      : DEFAULT_IGNORE_FILENAMES,
     rocketchatOutgoingToken: env.ROCKETCHAT_OUTGOING_TOKEN || undefined,
     rocketchatUrl: env.ROCKETCHAT_URL || undefined,
     rocketchatBotUserId: env.ROCKETCHAT_BOT_USER_ID || undefined,
