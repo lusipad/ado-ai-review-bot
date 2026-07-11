@@ -17,7 +17,8 @@ import { NotifyDispatcher } from './notify';
 import { prKey as toPrKey, type Logger } from './types';
 import { collectStats, formatWeeklyReport } from './stats';
 import { msUntilNextWeekly } from './util';
-import { ADMIN_HTML, STATUS_HTML, buildOverview, buildStatus } from './admin';
+import { ADMIN_HTML, buildOverview, buildStatus } from './admin';
+import { PORTAL_HTML, buildKnowledge, buildDocs } from './portal';
 import {
   handleChatCommand,
   isStructuredCommand,
@@ -65,16 +66,20 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
   app.get('/healthz', async () => ({ ok: true }));
 
-  // 公开只读状态页：团队成员无需密码即可看健康/队列/统计（错误详情仍在 /admin）
+  // 公开只读门户（状态/记忆与知识/文档多 tab）：无需密码；错误详情仍只在 /admin
   if (config.statusPage !== false) {
+    const portalKnowledge = new KnowledgeStore(path.join(config.dataDir, 'knowledge'));
+    app.get('/', async (_req, reply) => reply.redirect('/status'));
     app.get('/status', async (_req, reply) =>
-      reply.type('text/html; charset=utf-8').send(STATUS_HTML),
+      reply.type('text/html; charset=utf-8').send(PORTAL_HTML),
     );
     app.get('/status.json', async (req) => {
       const q = req.query as { days?: string };
       const days = Math.min(90, Math.max(1, Number(q.days) || 7));
       return buildStatus(deps.db, deps.scheduler, days);
     });
+    app.get('/knowledge.json', async () => buildKnowledge(deps.db, portalKnowledge));
+    app.get('/docs.json', async () => buildDocs());
   }
 
   // 度量：与 webhook 相同的密钥鉴权（x-webhook-secret 头或 basic auth 密码）

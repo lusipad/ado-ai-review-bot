@@ -37,7 +37,7 @@ Write-Host "==> [4/5] 组装部署目录"
 $stageRoot = Join-Path $env:TEMP ("ai-review-pkg-" + [System.Guid]::NewGuid().ToString("N"))
 $stage = Join-Path $stageRoot "ai-review-bot"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item -Recurse dist, prompts $stage
+Copy-Item -Recurse dist, prompts, docs $stage
 Copy-Item package.json, package-lock.json, .env.example $stage
 Copy-Item scripts\start.sh, scripts\start.ps1, scripts\DEPLOY.md $stage
 

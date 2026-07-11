@@ -66,7 +66,7 @@ PR 合并 / 放弃
 
 ## 管理与观测
 
-- **状态页 `http://<bot>:<port>/status`**：无需密码，任何人可看——bot 活着没、在忙哪个 PR、统计与采纳率（推荐放到团队 wiki/收藏夹）；
+- **公开门户 `http://<bot>:<port>/`**：无需密码——状态（活着没、在忙哪个 PR、采纳率）、记忆与知识（bot 学到了什么）、使用说明与示例（本文档在线版）四个 tab，推荐放到团队收藏夹；
 - 管理面板 `/admin`（密码=WEBHOOK_SECRET）：完整任务历史与错误详情；
 - `GET /status.json`（公开）/ `GET /stats?days=30&repo=...`（鉴权）程序化取数；
 - 部署自检 `node dist/server.js --doctor`。

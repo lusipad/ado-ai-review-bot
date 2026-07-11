@@ -44,7 +44,7 @@ STAGE_ROOT=$(mktemp -d)
 trap 'rm -rf "$STAGE_ROOT"' EXIT
 STAGE="$STAGE_ROOT/ai-review-bot"
 mkdir -p "$STAGE"
-cp -r dist prompts package.json package-lock.json .env.example "$STAGE/"
+cp -r dist prompts docs package.json package-lock.json .env.example "$STAGE/"
 cp scripts/start.sh scripts/start.ps1 scripts/DEPLOY.md "$STAGE/"
 chmod +x "$STAGE/start.sh"
 # 只装生产依赖（在 stage 里重新 ci，保证干净）

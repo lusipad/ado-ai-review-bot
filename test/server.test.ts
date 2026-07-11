@@ -375,7 +375,8 @@ describe('/status（公开只读）', () => {
     });
     const page = await app.inject({ method: 'GET', url: '/status' });
     expect(page.statusCode).toBe(200);
-    expect(page.body).toContain('AI Review Bot 状态');
+    expect(page.body).toContain('记忆与知识'); // 多 tab 门户
+    expect(page.body).toContain('使用说明');
 
     const res = await app.inject({ method: 'GET', url: '/status.json?days=7' });
     expect(res.statusCode).toBe(200);
@@ -386,6 +387,28 @@ describe('/status（公开只读）', () => {
     expect(body.recentRuns).toHaveLength(1);
     expect(body.recentRuns[0].ok).toBe(false);
     expect(JSON.stringify(body)).not.toContain('secret'); // 错误详情不外泄
+  });
+
+  it('/knowledge.json 与 /docs.json 公开可读', async () => {
+    db.insertReviewRun({
+      prKey: 'P/R/1', repoKey: 'P/R', kind: 'full', ok: true, durationMs: 1,
+      findingsTotal: 0, findingsPosted: 0, mustFix: 0, droppedByChallenge: 0, degraded: false,
+    });
+    const { KnowledgeStore } = await import('../src/knowledge');
+    const ks = new KnowledgeStore(path.join(tmpDir, 'knowledge'));
+    ks.addMemories('P/R', [{ type: '坑', text: '门户测试记忆' }]);
+    ks.save('P/R', { generatedAt: '2026-07-11T00:00:00Z', commit: 'abc', content: '# 地图\n模块划分……' });
+
+    const k = await app.inject({ method: 'GET', url: '/knowledge.json' });
+    expect(k.statusCode).toBe(200);
+    const repos = k.json();
+    const pr = repos.find((r: any) => r.repoKey === 'P/R');
+    expect(pr.map).toContain('地图');
+    expect(pr.memories[0].text).toBe('门户测试记忆');
+
+    const docs = await app.inject({ method: 'GET', url: '/docs.json' });
+    expect(docs.statusCode).toBe(200);
+    expect(docs.json().usage).toContain('使用手册'); // 读的是真实 docs/usage.md
   });
 });
 
